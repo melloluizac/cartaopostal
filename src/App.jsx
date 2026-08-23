@@ -16,6 +16,7 @@ import {
   Loader2,
   Pencil,
   Trash2,
+  ExternalLink,
 } from 'lucide-react'
 
 // -----------------------------------------------------------------------
@@ -608,21 +609,37 @@ function Dashboard({ session }) {
     setAlertRows(alertRes.data ?? [])
   }
 
-  // Se a pessoa preencheu "Pago por" + custo por pessoa num passeio/transporte,
-  // lança automaticamente um gasto correspondente em expenses_ledger, dividido
-  // igualmente entre todos os viajantes cadastrados (mesma regra do saldo).
+  // Viajante (linha de trip_travelers) vinculado à conta atualmente logada,
+  // via trip_travelers.user_id. Usado como responsável padrão quando
+  // "Pago por" é deixado em branco.
+  const currentTraveler = useMemo(
+    () => travelers.find((t) => t.user_id === session.user.id) ?? null,
+    [travelers, session.user.id]
+  )
+  const currentTravelerName = currentTraveler?.name ?? session.user.email
+
+  // Se a pessoa preencheu custo por pessoa num passeio/transporte, lança
+  // automaticamente um gasto correspondente em expenses_ledger. Se "Pago por"
+  // foi escolhido, divide "igual" entre todos os viajantes (mesma regra do
+  // saldo). Se foi deixado em branco, assume que é uma compra individual de
+  // quem cadastrou — não divide com ninguém.
   async function maybeLogExpense({ paidBy, costPerPerson, date, description, category }) {
     const perPerson = Number(costPerPerson)
-    if (!paidBy || !perPerson) return
-    const totalCost = perPerson * Math.max(travelers.length, 1)
+    if (!perPerson) return
+
+    const explicitPaidBy = paidBy?.trim()
+    const isIndividual = !explicitPaidBy
+    const finalPaidBy = explicitPaidBy || currentTravelerName
+    const totalCost = isIndividual ? perPerson : perPerson * Math.max(travelers.length, 1)
+
     const { error } = await supabase.from('expenses_ledger').insert({
       trip_id: trip.id,
       transaction_date: date || null,
       description,
       category,
       total_cost_eur: totalCost,
-      paid_by: paidBy,
-      split_type: 'igual',
+      paid_by: finalPaidBy,
+      split_type: isIndividual ? 'individual' : 'igual',
     })
     if (error) throw error
     await refreshBalanceAndAlerts()
@@ -693,14 +710,18 @@ function Dashboard({ session }) {
   }
 
   async function handleAddExpense(form) {
+    const explicitPaidBy = form.paid_by?.trim()
+    const isIndividual = !explicitPaidBy
+    const finalPaidBy = explicitPaidBy || currentTravelerName
+
     const { error } = await supabase.from('expenses_ledger').insert({
       trip_id: trip.id,
       transaction_date: form.transaction_date || null,
       description: form.description,
       category: form.category || null,
       total_cost_eur: form.total_cost_eur ? Number(form.total_cost_eur) : 0,
-      paid_by: form.paid_by,
-      split_type: form.split_type || 'igual',
+      paid_by: finalPaidBy,
+      split_type: isIndividual ? 'individual' : form.split_type || 'igual',
     })
     if (error) throw error
     await refreshBalanceAndAlerts()
@@ -1043,6 +1064,24 @@ function Dashboard({ session }) {
                             {item.data.cost_per_person_eur != null &&
                               ` · ${formatEUR(item.data.cost_per_person_eur)}/pessoa`}
                           </p>
+                          {item.kind === 'activity' && item.data.booking_rule && (
+                            <p className="mt-1 inline-flex items-center gap-1 rounded-md bg-accent/15 px-1.5 py-0.5 font-mono text-[10px] text-accent">
+                              <AlertCircle className="h-3 w-3 shrink-0" aria-hidden="true" />
+                              {item.data.booking_rule}
+                            </p>
+                          )}
+                          {item.kind === 'activity' && item.data.ticket_url && (
+                            <a
+                              href={item.data.ticket_url}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              onClick={(e) => e.stopPropagation()}
+                              className="mt-1 inline-flex items-center gap-1 font-mono text-[10px] text-primary underline underline-offset-2"
+                            >
+                              <ExternalLink className="h-3 w-3 shrink-0" aria-hidden="true" />
+                              Abrir ingresso
+                            </a>
+                          )}
                         </div>
                       </div>
                       <div className="flex items-center gap-1">
@@ -1114,7 +1153,7 @@ function Dashboard({ session }) {
             { name: 'cost_per_person_eur', label: 'Custo por pessoa (EUR)', type: 'number' },
             {
               name: 'paid_by',
-              label: 'Pago por (se já foi pago, lança automaticamente como gasto)',
+              label: 'Pago por (opcional — se vazio, vira compra individual sua)',
               type: 'select',
               options: travelers.map((t) => t.name),
             },
@@ -1147,7 +1186,7 @@ function Dashboard({ session }) {
             { name: 'cost_per_person_eur', label: 'Custo por pessoa (EUR)', type: 'number' },
             {
               name: 'paid_by',
-              label: 'Pago por (se já foi pago, lança automaticamente como gasto)',
+              label: 'Pago por (opcional — se vazio, vira compra individual sua)',
               type: 'select',
               options: travelers.map((t) => t.name),
             },
@@ -1226,9 +1265,19 @@ function Dashboard({ session }) {
           fields={[
             { name: 'description', label: 'Descrição', required: true },
             { name: 'transaction_date', label: 'Data', type: 'date' },
-            { name: 'category', label: 'Categoria' },
+            {
+              name: 'category',
+              label: 'Categoria',
+              type: 'select',
+              options: ['Passeio', 'Transporte', 'Alimentação', 'Compras', 'Hospedagem'],
+            },
             { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number', required: true },
-            { name: 'paid_by', label: 'Pago por', type: 'select', options: travelers.map((t) => t.name), required: true },
+            {
+              name: 'paid_by',
+              label: 'Pago por (opcional — se vazio, vira compra individual sua)',
+              type: 'select',
+              options: travelers.map((t) => t.name),
+            },
             {
               name: 'split_type',
               label: 'Divisão',
