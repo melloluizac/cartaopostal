@@ -1,0 +1,20 @@
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+    /* Textura sutil de papel, igual às frames de validação */
+    background-image: radial-gradient(circle at 1px 1px, rgba(59, 42, 34, 0.05) 1px, transparent 0);
+    background-size: 4px 4px;
+  }
+}
+
+@layer utilities {
+  .font-display {
+    font-family: 'Cormorant Garamond', serif;
+  }
+}
