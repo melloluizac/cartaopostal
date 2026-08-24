@@ -46,6 +46,11 @@ const formatDate = (iso) => {
 // instalado, já com o local pré-preenchido.
 const buildMapsSearchUrl = (query) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`
 
+// `expenses_ledger.transaction_date` não aceita nulo no banco. Quando o
+// passeio/transporte de origem ainda não tem data definida, usa a data de
+// hoje como padrão em vez de tentar gravar null (o que gerava erro 400).
+const todayIso = () => new Date().toISOString().slice(0, 10)
+
 // Dias até uma data (negativo = já passou)
 const daysUntil = (iso) => {
   if (!iso) return null
@@ -729,11 +734,14 @@ function Dashboard({ session }) {
   )
 
   // Recarrega hospedagens, passeios e transporte quando o destino ativo muda
+  // — ou quando a lista de destinos termina de carregar (loadItineraryData é
+  // recriada nesse momento, já que depende de `destinations`). Sem isso, a
+  // primeiríssima busca em "Visão geral" podia rodar antes das cidades
+  // chegarem do banco, e nunca era refeita sozinha depois.
   useEffect(() => {
     if (!activeDestId || !trip) return
     loadItineraryData(activeDestId)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeDestId, trip])
+  }, [activeDestId, loadItineraryData])
 
   // Recarrega o extrato de gastos (já filtrado pelo RLS: entradas
   // "Individual" de outra conta simplesmente não voltam nessa consulta) e
@@ -766,7 +774,7 @@ function Dashboard({ session }) {
 
     const { error } = await supabase.from('expenses_ledger').insert({
       trip_id: trip.id,
-      transaction_date: date || null,
+      transaction_date: date || todayIso(),
       description,
       category,
       total_cost_eur: totalCost,
@@ -859,7 +867,7 @@ function Dashboard({ session }) {
 
     const { error } = await supabase.from('expenses_ledger').insert({
       trip_id: trip.id,
-      transaction_date: form.transaction_date || null,
+      transaction_date: form.transaction_date || todayIso(),
       description: form.description,
       category: form.category || null,
       total_cost_eur: form.total_cost_eur ? Number(form.total_cost_eur) : 0,
