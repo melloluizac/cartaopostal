@@ -17,6 +17,10 @@ import {
   Pencil,
   Trash2,
   ExternalLink,
+  Home,
+  Hotel,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react'
 
 // -----------------------------------------------------------------------
@@ -35,6 +39,12 @@ const formatDate = (iso) => {
     month: 'short',
   })
 }
+
+// Gera o link de busca do Google Maps (formato oficial /maps/search) a
+// partir de um texto livre — ex: "Coliseu Roma". Em iOS/Android, esse
+// formato costuma acionar a abertura direta no app nativo do Maps quando
+// instalado, já com o local pré-preenchido.
+const buildMapsSearchUrl = (query) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`
 
 // Dias até uma data (negativo = já passou)
 const daysUntil = (iso) => {
@@ -57,6 +67,18 @@ const STATUS_CONFIG = {
   planejando: { label: 'Planejando', icon: HelpCircle, className: 'bg-primary/10 text-primary border-primary/40' },
 }
 const STATUS_ORDER = ['confirmado', 'pendente', 'atrasado', 'planejando']
+
+// Cores sólidas (não dá pra usar opacidade/tailwind em <option>, precisa de
+// hex de verdade) usadas só no filtro de status da tela de Roteiro.
+const STATUS_OPTION_COLORS = {
+  confirmado: { bg: '#d9e2cd', fg: '#2c3125' },
+  pendente: { bg: '#f0dcd0', fg: '#7a3a1e' },
+  atrasado: { bg: '#f0d6d2', fg: '#7a2e22' },
+  planejando: { bg: '#dbe6e8', fg: '#234047' },
+}
+
+// Categorias fixas de gasto, pra manter padrão no Controle de Gastos.
+const EXPENSE_CATEGORIES = ['Passeio', 'Transporte', 'Alimentação', 'Compras', 'Hospedagem']
 
 // Se `onChange` for passado, o badge vira clicável: um <select> nativo fica
 // posicionado (invisível) por cima do badge inteiro, então o clique em
@@ -302,7 +324,10 @@ function LoginScreen() {
 }
 
 // -----------------------------------------------------------------------
-// Formulário genérico "Adicionar" — usado para atividade / transporte / gasto
+// Formulário genérico "Adicionar/Editar" — usado para passeio, transporte e
+// gasto. Campos `select` aceitam tanto um array de strings simples quanto um
+// array de { value, label } (usado pelo "Tipo de divisão", cujos rótulos
+// mudam conforme os nomes dos viajantes).
 // -----------------------------------------------------------------------
 
 function QuickAddSheet({ title, icon: Icon, fields, initialValues, onSubmit, onDelete, onClose }) {
@@ -376,11 +401,15 @@ function QuickAddSheet({ title, icon: Icon, fields, initialValues, onSubmit, onD
                   <option value="" disabled>
                     Selecione
                   </option>
-                  {f.options.map((opt) => (
-                    <option key={opt} value={opt}>
-                      {opt}
-                    </option>
-                  ))}
+                  {f.options.map((opt) => {
+                    const value = typeof opt === 'string' ? opt : opt.value
+                    const label = typeof opt === 'string' ? opt : opt.label
+                    return (
+                      <option key={value} value={value}>
+                        {label}
+                      </option>
+                    )
+                  })}
                 </select>
               ) : f.type === 'textarea' ? (
                 <textarea
@@ -457,26 +486,31 @@ function QuickAddSheet({ title, icon: Icon, fields, initialValues, onSubmit, onD
 }
 
 // -----------------------------------------------------------------------
-// Dashboard
+// Dashboard (3 telas: Início, Roteiro, Gastos)
 // -----------------------------------------------------------------------
 
 function Dashboard({ session }) {
+  const [view, setView] = useState('home') // 'home' | 'roteiro' | 'gastos'
   const [trip, setTrip] = useState(null)
   const [destinations, setDestinations] = useState([])
   const [travelers, setTravelers] = useState([]) // linhas de trip_travelers, para os dropdowns "Pago por"
-  const [activeDestId, setActiveDestId] = useState(null) // id de um destino, ou 'ALL' para a visão geral
+  const [activeDestId, setActiveDestId] = useState('ALL') // id de um destino, ou 'ALL' (Visão geral)
   const [statusFilter, setStatusFilter] = useState('all') // 'all' | 'confirmado' | 'pendente' | 'atrasado' | 'planejando'
+  const [categoryFilter, setCategoryFilter] = useState('all') // 'all' | 'activity' | 'transport' | 'accommodation'
+  const [expandedDays, setExpandedDays] = useState(() => new Set()) // dias abertos na Visão geral (accordion)
   const [accommodations, setAccommodations] = useState([])
   const [activities, setActivities] = useState([])
   const [transport, setTransport] = useState([])
-  const [balanceRows, setBalanceRows] = useState([])
+  const [expenses, setExpenses] = useState([]) // linhas cruas de expenses_ledger (já filtradas por RLS)
   const [alertRows, setAlertRows] = useState([])
+  const [tripStartDate, setTripStartDate] = useState(null) // calculado, não vem de trips
+  const [pendingCount, setPendingCount] = useState(0)
   const [loading, setLoading] = useState(true)
   const [openSheet, setOpenSheet] = useState(null) // 'activity' | 'transport' | 'expense' | null
   const [editingItem, setEditingItem] = useState(null) // { kind: 'activity' | 'transport', data: {...} } | null
   const [errorMsg, setErrorMsg] = useState(null)
 
-  // Carrega a viagem do usuário logado + destinos + viajantes + views financeiras/alertas
+  // Carrega a viagem do usuário logado + destinos + viajantes + alertas
   useEffect(() => {
     let ignore = false
     async function loadTrip() {
@@ -506,24 +540,19 @@ function Dashboard({ session }) {
       if (ignore) return
       setTrip(currentTrip)
 
-      const [destRes, travelersRes, balanceRes, alertRes] = await Promise.all([
+      const [destRes, travelersRes, alertRes] = await Promise.all([
         supabase
           .from('destinations')
           .select('*')
           .eq('trip_id', currentTrip.id)
           .order('order_index', { ascending: true }),
         supabase.from('trip_travelers').select('*').eq('trip_id', currentTrip.id),
-        supabase.from('view_trip_financial_balance').select('*').eq('trip_id', currentTrip.id),
         supabase.from('view_hotel_cancellation_alerts').select('*').eq('trip_id', currentTrip.id),
       ])
 
       if (!ignore) {
-        if (destRes.data) {
-          setDestinations(destRes.data)
-          setActiveDestId((prev) => prev ?? destRes.data[0]?.id ?? null)
-        }
+        if (destRes.data) setDestinations(destRes.data)
         setTravelers(travelersRes.data ?? [])
-        setBalanceRows(balanceRes.data ?? [])
         setAlertRows(alertRes.data ?? [])
         setLoading(false)
       }
@@ -533,6 +562,107 @@ function Dashboard({ session }) {
       ignore = true
     }
   }, [session.user.id])
+
+  // Viajante (linha de trip_travelers) vinculado à conta atualmente logada,
+  // via trip_travelers.user_id. Usado como responsável padrão quando
+  // "Pago por" é deixado em branco.
+  const currentTraveler = useMemo(
+    () => travelers.find((t) => t.user_id === session.user.id) ?? null,
+    [travelers, session.user.id]
+  )
+  const currentTravelerName = currentTraveler?.name ?? session.user.email
+
+  // Opções do "Tipo de divisão", com os nomes reais dos dois primeiros
+  // viajantes cadastrados (se ainda não houver dois, usa um rótulo genérico).
+  const splitTypeOptions = useMemo(() => {
+    const nameA = travelers[0]?.name ?? 'Pessoa A'
+    const nameB = travelers[1]?.name ?? 'Pessoa B'
+    return [
+      { value: 'igual', label: '50/50' },
+      { value: 'total_a', label: `100% ${nameA}` },
+      { value: 'total_b', label: `100% ${nameB}` },
+      { value: 'individual', label: 'Individual (privado)' },
+    ]
+  }, [travelers])
+
+  // Data de início da viagem, calculada como a menor data entre todas as
+  // hospedagens/passeios/transportes já cadastrados em qualquer cidade —
+  // a tabela trips não tem campo de data próprio.
+  useEffect(() => {
+    if (!trip || destinations.length === 0) {
+      setTripStartDate(null)
+      return
+    }
+    let ignore = false
+    async function loadEarliestDate() {
+      const destIds = destinations.map((d) => d.id)
+      const [accRes, actRes, transRes] = await Promise.all([
+        supabase
+          .from('accommodations')
+          .select('check_in')
+          .in('destination_id', destIds)
+          .not('check_in', 'is', null)
+          .order('check_in', { ascending: true })
+          .limit(1),
+        supabase
+          .from('itinerary_activities')
+          .select('assigned_date')
+          .in('destination_id', destIds)
+          .not('assigned_date', 'is', null)
+          .order('assigned_date', { ascending: true })
+          .limit(1),
+        supabase
+          .from('transport')
+          .select('departure_date')
+          .eq('trip_id', trip.id)
+          .not('departure_date', 'is', null)
+          .order('departure_date', { ascending: true })
+          .limit(1),
+      ])
+      const candidates = [
+        accRes.data?.[0]?.check_in,
+        actRes.data?.[0]?.assigned_date,
+        transRes.data?.[0]?.departure_date,
+      ].filter(Boolean)
+      if (!ignore) setTripStartDate(candidates.length ? candidates.sort()[0] : null)
+    }
+    loadEarliestDate()
+    return () => {
+      ignore = true
+    }
+  }, [trip, destinations])
+
+  // Contagem de itens pendentes (passeios + transportes + hospedagens de
+  // TODAS as cidades), usada no card clicável da tela Início.
+  const loadPendingCount = useCallback(async () => {
+    if (!trip || destinations.length === 0) {
+      setPendingCount(0)
+      return
+    }
+    const destIds = destinations.map((d) => d.id)
+    const [accRes, actRes, transRes] = await Promise.all([
+      supabase
+        .from('accommodations')
+        .select('id', { count: 'exact', head: true })
+        .in('destination_id', destIds)
+        .eq('status', 'pendente'),
+      supabase
+        .from('itinerary_activities')
+        .select('id', { count: 'exact', head: true })
+        .in('destination_id', destIds)
+        .eq('status', 'pendente'),
+      supabase
+        .from('transport')
+        .select('id', { count: 'exact', head: true })
+        .eq('trip_id', trip.id)
+        .eq('status', 'pendente'),
+    ])
+    setPendingCount((accRes.count ?? 0) + (actRes.count ?? 0) + (transRes.count ?? 0))
+  }, [trip, destinations])
+
+  useEffect(() => {
+    loadPendingCount()
+  }, [loadPendingCount])
 
   // Carrega hospedagens, passeios e transporte de um destino específico, ou
   // de TODOS os destinos da viagem quando destId === 'ALL' (visão geral).
@@ -599,38 +729,34 @@ function Dashboard({ session }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDestId, trip])
 
-  async function refreshBalanceAndAlerts() {
+  // Recarrega o extrato de gastos (já filtrado pelo RLS: entradas
+  // "Individual" de outra conta simplesmente não voltam nessa consulta) e
+  // os alertas de cancelamento.
+  const refreshFinancials = useCallback(async () => {
     if (!trip) return
-    const [balanceRes, alertRes] = await Promise.all([
-      supabase.from('view_trip_financial_balance').select('*').eq('trip_id', trip.id),
+    const [expensesRes, alertRes] = await Promise.all([
+      supabase.from('expenses_ledger').select('*').eq('trip_id', trip.id).order('transaction_date', { ascending: false }),
       supabase.from('view_hotel_cancellation_alerts').select('*').eq('trip_id', trip.id),
     ])
-    setBalanceRows(balanceRes.data ?? [])
+    setExpenses(expensesRes.data ?? [])
     setAlertRows(alertRes.data ?? [])
-  }
+  }, [trip])
 
-  // Viajante (linha de trip_travelers) vinculado à conta atualmente logada,
-  // via trip_travelers.user_id. Usado como responsável padrão quando
-  // "Pago por" é deixado em branco.
-  const currentTraveler = useMemo(
-    () => travelers.find((t) => t.user_id === session.user.id) ?? null,
-    [travelers, session.user.id]
-  )
-  const currentTravelerName = currentTraveler?.name ?? session.user.email
+  useEffect(() => {
+    refreshFinancials()
+  }, [refreshFinancials])
 
   // Se a pessoa preencheu custo por pessoa num passeio/transporte, lança
-  // automaticamente um gasto correspondente em expenses_ledger. Se "Pago por"
-  // foi escolhido, divide "igual" entre todos os viajantes (mesma regra do
-  // saldo). Se foi deixado em branco, assume que é uma compra individual de
-  // quem cadastrou — não divide com ninguém.
-  async function maybeLogExpense({ paidBy, costPerPerson, date, description, category }) {
+  // automaticamente um gasto correspondente em expenses_ledger. "50/50"
+  // multiplica pelo nº de viajantes (é uma despesa compartilhada); os outros
+  // 3 tipos ficam só com o valor informado (não são divididos com ninguém).
+  async function maybeLogExpense({ paidBy, splitType, costPerPerson, date, description, category }) {
     const perPerson = Number(costPerPerson)
     if (!perPerson) return
 
-    const explicitPaidBy = paidBy?.trim()
-    const isIndividual = !explicitPaidBy
-    const finalPaidBy = explicitPaidBy || currentTravelerName
-    const totalCost = isIndividual ? perPerson : perPerson * Math.max(travelers.length, 1)
+    const finalPaidBy = paidBy?.trim() || currentTravelerName
+    const finalSplitType = splitType || 'individual'
+    const totalCost = finalSplitType === 'igual' ? perPerson * Math.max(travelers.length, 1) : perPerson
 
     const { error } = await supabase.from('expenses_ledger').insert({
       trip_id: trip.id,
@@ -639,14 +765,15 @@ function Dashboard({ session }) {
       category,
       total_cost_eur: totalCost,
       paid_by: finalPaidBy,
-      split_type: isIndividual ? 'individual' : 'igual',
+      split_type: finalSplitType,
+      created_by: session.user.id,
     })
     if (error) throw error
-    await refreshBalanceAndAlerts()
+    await refreshFinancials()
   }
 
   // Atualiza o status de uma linha (hospedagem, passeio ou transporte) ao
-  // clicar no badge, e recarrega a lista pra refletir a mudança.
+  // clicar no badge, e recarrega tudo que depende disso.
   async function handleStatusChange(table, id, newStatus) {
     const { error } = await supabase.from(table).update({ status: newStatus }).eq('id', id)
     if (error) {
@@ -654,6 +781,7 @@ function Dashboard({ session }) {
       return
     }
     await loadItineraryData(activeDestId)
+    await loadPendingCount()
   }
 
   // --- Handlers de insert -------------------------------------------------
@@ -675,6 +803,7 @@ function Dashboard({ session }) {
 
     await maybeLogExpense({
       paidBy: form.paid_by,
+      splitType: form.split_type,
       costPerPerson: form.cost_per_person_eur,
       date: form.assigned_date,
       description: `Passeio: ${form.activity_name}`,
@@ -682,13 +811,16 @@ function Dashboard({ session }) {
     })
 
     await loadItineraryData(activeDestId)
+    await loadPendingCount()
   }
 
   async function handleAddTransport(form) {
     const { error } = await supabase.from('transport').insert({
       trip_id: trip.id,
       origin_city: form.origin_city,
+      origin_station: form.origin_station || null,
       destination_city: form.destination_city,
+      destination_station: form.destination_station || null,
       departure_date: form.departure_date || null,
       departure_time: form.departure_time || null,
       arrival_time: form.arrival_time || null,
@@ -700,6 +832,7 @@ function Dashboard({ session }) {
 
     await maybeLogExpense({
       paidBy: form.paid_by,
+      splitType: form.split_type,
       costPerPerson: form.cost_per_person_eur,
       date: form.departure_date,
       description: `Transporte: ${form.origin_city} → ${form.destination_city}`,
@@ -707,12 +840,12 @@ function Dashboard({ session }) {
     })
 
     await loadItineraryData(activeDestId)
+    await loadPendingCount()
   }
 
   async function handleAddExpense(form) {
-    const explicitPaidBy = form.paid_by?.trim()
-    const isIndividual = !explicitPaidBy
-    const finalPaidBy = explicitPaidBy || currentTravelerName
+    const finalPaidBy = form.paid_by?.trim() || currentTravelerName
+    const finalSplitType = form.split_type || 'individual'
 
     const { error } = await supabase.from('expenses_ledger').insert({
       trip_id: trip.id,
@@ -721,10 +854,11 @@ function Dashboard({ session }) {
       category: form.category || null,
       total_cost_eur: form.total_cost_eur ? Number(form.total_cost_eur) : 0,
       paid_by: finalPaidBy,
-      split_type: isIndividual ? 'individual' : form.split_type || 'igual',
+      split_type: finalSplitType,
+      created_by: session.user.id,
     })
     if (error) throw error
-    await refreshBalanceAndAlerts()
+    await refreshFinancials()
   }
 
   // --- Handlers de edição / exclusão --------------------------------------
@@ -748,12 +882,14 @@ function Dashboard({ session }) {
       .eq('id', id)
     if (error) throw error
     await loadItineraryData(activeDestId)
+    await loadPendingCount()
   }
 
   async function handleDeleteActivity(id) {
     const { error } = await supabase.from('itinerary_activities').delete().eq('id', id)
     if (error) throw error
     await loadItineraryData(activeDestId)
+    await loadPendingCount()
   }
 
   async function handleUpdateTransport(id, form) {
@@ -761,7 +897,9 @@ function Dashboard({ session }) {
       .from('transport')
       .update({
         origin_city: form.origin_city,
+        origin_station: form.origin_station || null,
         destination_city: form.destination_city,
+        destination_station: form.destination_station || null,
         departure_date: form.departure_date || null,
         departure_time: form.departure_time || null,
         arrival_time: form.arrival_time || null,
@@ -772,38 +910,65 @@ function Dashboard({ session }) {
       .eq('id', id)
     if (error) throw error
     await loadItineraryData(activeDestId)
+    await loadPendingCount()
   }
 
   async function handleDeleteTransport(id) {
     const { error } = await supabase.from('transport').delete().eq('id', id)
     if (error) throw error
     await loadItineraryData(activeDestId)
+    await loadPendingCount()
   }
 
-  // Mapa id do destino -> nome da cidade, usado só na "Visão geral" pra
+  function toggleDay(date) {
+    setExpandedDays((prev) => {
+      const next = new Set(prev)
+      if (next.has(date)) next.delete(date)
+      else next.add(date)
+      return next
+    })
+  }
+
+  // Mapa id do destino -> nome da cidade, usado na Visão geral pra
   // identificar de qual cidade cada item da timeline é.
   const destById = useMemo(
     () => Object.fromEntries(destinations.map((d) => [d.id, d.city_name])),
     [destinations]
   )
 
-  const filteredAccommodations = useMemo(
-    () => (statusFilter === 'all' ? accommodations : accommodations.filter((a) => a.status === statusFilter)),
-    [accommodations, statusFilter]
-  )
-  const filteredActivities = useMemo(
-    () => (statusFilter === 'all' ? activities : activities.filter((a) => a.status === statusFilter)),
-    [activities, statusFilter]
-  )
-  const filteredTransport = useMemo(
-    () => (statusFilter === 'all' ? transport : transport.filter((t) => t.status === statusFilter)),
-    [transport, statusFilter]
-  )
+  const filteredAccommodations = useMemo(() => {
+    let list = accommodations
+    if (statusFilter !== 'all') list = list.filter((a) => a.status === statusFilter)
+    if (categoryFilter !== 'all' && categoryFilter !== 'accommodation') list = []
+    return list
+  }, [accommodations, statusFilter, categoryFilter])
 
-  // --- Timeline combinada (atividades + transporte) do destino ativo -----
+  const filteredActivities = useMemo(() => {
+    let list = activities
+    if (statusFilter !== 'all') list = list.filter((a) => a.status === statusFilter)
+    if (categoryFilter !== 'all' && categoryFilter !== 'activity') list = []
+    return list
+  }, [activities, statusFilter, categoryFilter])
+
+  const filteredTransport = useMemo(() => {
+    let list = transport
+    if (statusFilter !== 'all') list = list.filter((t) => t.status === statusFilter)
+    if (categoryFilter !== 'all' && categoryFilter !== 'transport') list = []
+    return list
+  }, [transport, statusFilter, categoryFilter])
+
+  // --- Timeline combinada (hospedagem + passeios + transporte) -----------
+  // Hospedagens entram no dia do check-in (não ficam mais numa seção à
+  // parte no topo).
 
   const timelineByDay = useMemo(() => {
     const groups = {}
+    for (const acc of filteredAccommodations) {
+      if (!acc.check_in) continue
+      const key = acc.check_in
+      groups[key] = groups[key] ?? []
+      groups[key].push({ kind: 'accommodation', time: '00:00', data: acc })
+    }
     for (const a of filteredActivities) {
       const key = a.assigned_date ?? 'Sem data'
       groups[key] = groups[key] ?? []
@@ -820,12 +985,69 @@ function Dashboard({ session }) {
         date,
         items: items.sort((a, b) => (a.time ?? '99:99').localeCompare(b.time ?? '99:99')),
       }))
-  }, [filteredActivities, filteredTransport])
+  }, [filteredAccommodations, filteredActivities, filteredTransport])
 
   const urgentAlerts = useMemo(
     () => alertRows.filter((row) => (row.days_remaining ?? daysUntil(row.cancellation_deadline)) <= 7),
     [alertRows]
   )
+
+  // --- Saldo do grupo (calculado no app, não numa view SQL) --------------
+  // "Total pago" soma tudo que a pessoa desembolsou, qualquer tipo de
+  // divisão. "Saldo" (a receber/a pagar) só considera os gastos 50/50 — os
+  // "100% Pessoa X" e "Individual" não geram cobrança pra ninguém.
+  const balances = useMemo(() => {
+    const totalPaidByName = {}
+    const sharedPaidByName = {}
+    let sharedPool = 0
+    for (const t of travelers) {
+      totalPaidByName[t.name] = 0
+      sharedPaidByName[t.name] = 0
+    }
+    for (const e of expenses) {
+      const cost = Number(e.total_cost_eur) || 0
+      if (e.paid_by && totalPaidByName[e.paid_by] !== undefined) {
+        totalPaidByName[e.paid_by] += cost
+        if (e.split_type === 'igual') sharedPaidByName[e.paid_by] += cost
+      }
+      if (e.split_type === 'igual') sharedPool += cost
+    }
+    const fairShare = travelers.length ? sharedPool / travelers.length : 0
+    return travelers.map((t) => ({
+      name: t.name,
+      totalPaid: totalPaidByName[t.name] ?? 0,
+      balance: (sharedPaidByName[t.name] ?? 0) - fairShare,
+    }))
+  }, [expenses, travelers])
+
+  const grandTotal = useMemo(
+    () => expenses.reduce((sum, e) => sum + (Number(e.total_cost_eur) || 0), 0),
+    [expenses]
+  )
+
+  const categoryTotals = useMemo(() => {
+    const totals = {}
+    for (const e of expenses) {
+      const cat = e.category || 'Outros'
+      totals[cat] = (totals[cat] ?? 0) + (Number(e.total_cost_eur) || 0)
+    }
+    return Object.entries(totals).sort((a, b) => b[1] - a[1])
+  }, [expenses])
+
+  const maxCategoryAmount = useMemo(
+    () => Math.max(1, ...categoryTotals.map(([, amount]) => amount)),
+    [categoryTotals]
+  )
+
+  // Contagem regressiva mostrada na tela Início
+  const countdownLabel = useMemo(() => {
+    if (!tripStartDate) return 'Sem data ainda'
+    const days = daysUntil(tripStartDate)
+    if (days > 1) return `${days} dias para a viagem`
+    if (days === 1) return 'Falta 1 dia!'
+    if (days === 0) return 'É hoje!'
+    return 'Viagem em andamento'
+  }, [tripStartDate])
 
   if (loading) {
     return (
@@ -855,13 +1077,10 @@ function Dashboard({ session }) {
 
   return (
     <div className="min-h-screen bg-background pb-24">
-      {/* Header */}
+      {/* Header comum às 3 telas */}
       <header className="sticky top-0 z-10 border-b border-border bg-card/95 px-4 py-3 backdrop-blur">
         <div className="mx-auto flex max-w-2xl items-center justify-between">
-          <div>
-            <p className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">Cartão Postal</p>
-            <h1 className="font-display text-2xl font-semibold leading-tight text-foreground">{trip.title}</h1>
-          </div>
+          <p className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">Cartão Postal</p>
           <button
             onClick={() => supabase.auth.signOut()}
             aria-label="Sair"
@@ -869,6 +1088,26 @@ function Dashboard({ session }) {
           >
             <LogOut className="h-4 w-4" />
           </button>
+        </div>
+
+        {/* Navegação entre as 3 telas */}
+        <div className="mx-auto mt-2 grid max-w-2xl grid-cols-3 gap-1 rounded-lg border border-border bg-background p-1">
+          {[
+            { key: 'home', label: 'Início', icon: Home },
+            { key: 'roteiro', label: 'Roteiro', icon: MapPin },
+            { key: 'gastos', label: 'Gastos', icon: Wallet },
+          ].map(({ key, label, icon: NavIcon }) => (
+            <button
+              key={key}
+              onClick={() => setView(key)}
+              className={`flex items-center justify-center gap-1.5 rounded-md py-1.5 font-mono text-[11px] uppercase tracking-wide transition-colors ${
+                view === key ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'
+              }`}
+            >
+              <NavIcon className="h-3.5 w-3.5" aria-hidden="true" />
+              {label}
+            </button>
+          ))}
         </div>
       </header>
 
@@ -879,59 +1118,316 @@ function Dashboard({ session }) {
           </p>
         )}
 
-        {/* Saldo financeiro */}
-        <section aria-labelledby="saldo-heading">
-          <h2 id="saldo-heading" className="mb-2 flex items-center gap-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground">
-            <Wallet className="h-3.5 w-3.5" /> Saldo do grupo
-          </h2>
-          <div className="grid grid-cols-2 gap-3">
-            {balanceRows.length === 0 && (
-              <p className="col-span-2 rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
-                Nenhum gasto lançado ainda.
-              </p>
-            )}
-            {balanceRows.map((row) => {
-              const balance = Number(row.balance ?? 0)
-              const isPositive = balance >= 0
-              return (
-                <div key={row.paid_by ?? row.person_name} className="rounded-xl border border-border bg-card p-3">
-                  <p className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">
-                    {row.paid_by ?? row.person_name}
-                  </p>
-                  <p className="font-display text-xl font-semibold text-foreground">
-                    {formatEUR(row.total_paid ?? row.total_paid_eur)}
-                  </p>
-                  <p className={`font-mono text-[11px] ${isPositive ? 'text-secondary-foreground' : 'text-accent'}`}>
-                    {isPositive ? 'a receber ' : 'a pagar '}
-                    {formatEUR(Math.abs(balance))}
-                  </p>
-                </div>
-              )
-            })}
-          </div>
-        </section>
+        {/* ================= TELA 1 — INÍCIO ================= */}
+        {view === 'home' && (
+          <div className="flex flex-col items-center gap-8 px-2 pt-10 text-center">
+            <div>
+              <p className="font-mono text-xs uppercase tracking-wide text-muted-foreground">Cartão Postal</p>
+              <h1 className="font-display text-3xl font-semibold text-foreground">{trip.title}</h1>
+            </div>
 
-        {/* Alertas de cancelamento */}
-        {urgentAlerts.length > 0 && (
-          <section aria-labelledby="alertas-heading">
-            <h2 id="alertas-heading" className="mb-2 flex items-center gap-1.5 font-mono text-xs uppercase tracking-wide text-rosewood">
-              <AlertTriangle className="h-3.5 w-3.5" /> Cancelamento próximo
-            </h2>
-            <div className="flex flex-col gap-2">
-              {urgentAlerts.map((row, i) => {
-                const days = row.days_remaining ?? daysUntil(row.cancellation_deadline)
-                return (
-                  <div
-                    key={row.accommodation_id ?? i}
-                    className="flex items-center justify-between rounded-xl border border-accent/40 bg-accent/10 px-3 py-2.5"
-                  >
-                    <div>
-                      <p className="font-medium text-foreground">{row.hotel_name}</p>
-                      <p className="font-mono text-[11px] text-muted-foreground">{row.city_name}</p>
+            <p className="font-display text-4xl font-semibold leading-tight text-primary sm:text-5xl">
+              {countdownLabel}
+            </p>
+
+            <button
+              onClick={() => {
+                setActiveDestId('ALL')
+                setStatusFilter('pendente')
+                setCategoryFilter('all')
+                setView('roteiro')
+              }}
+              className="rounded-full border border-accent/40 bg-accent/10 px-4 py-2 font-mono text-xs uppercase tracking-wide text-accent"
+            >
+              {pendingCount} {pendingCount === 1 ? 'pendência' : 'pendências'}
+            </button>
+
+            {urgentAlerts.length > 0 && (
+              <div className="flex w-full flex-col gap-2 text-left">
+                <h2 className="flex items-center gap-1.5 font-mono text-xs uppercase tracking-wide text-rosewood">
+                  <AlertTriangle className="h-3.5 w-3.5" /> Cancelamento próximo
+                </h2>
+                {urgentAlerts.map((row, i) => {
+                  const days = row.days_remaining ?? daysUntil(row.cancellation_deadline)
+                  return (
+                    <div
+                      key={row.accommodation_id ?? i}
+                      className="flex items-center justify-between rounded-xl border border-accent/40 bg-accent/10 px-3 py-2.5"
+                    >
+                      <div>
+                        <p className="font-medium text-foreground">{row.hotel_name}</p>
+                        <p className="font-mono text-[11px] text-muted-foreground">{row.city_name}</p>
+                      </div>
+                      <span className="font-mono text-xs font-semibold text-accent">
+                        {days <= 0 ? 'vence hoje' : `${days}d restantes`}
+                      </span>
                     </div>
-                    <span className="font-mono text-xs font-semibold text-accent">
-                      {days <= 0 ? 'vence hoje' : `${days}d restantes`}
-                    </span>
+                  )
+                })}
+              </div>
+            )}
+
+            <button
+              onClick={() => {
+                setActiveDestId('ALL')
+                setStatusFilter('all')
+                setCategoryFilter('all')
+                setView('roteiro')
+              }}
+              className="mt-4 w-full rounded-lg border border-border bg-card py-3 font-mono text-xs uppercase tracking-wide text-foreground"
+            >
+              Ver Tudo
+            </button>
+          </div>
+        )}
+
+        {/* ================= TELA 2 — ROTEIRO ================= */}
+        {view === 'roteiro' && (
+          <section aria-labelledby="roteiro-heading">
+            <h2 id="roteiro-heading" className="mb-2 flex items-center gap-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground">
+              <MapPin className="h-3.5 w-3.5" /> Roteiro
+            </h2>
+
+            {/* 3 filtros lado a lado: Cidade / Status / Tipo */}
+            <div className="grid grid-cols-3 gap-2">
+              <select
+                value={activeDestId}
+                onChange={(e) => setActiveDestId(e.target.value)}
+                className="rounded-lg border border-input bg-card px-2 py-2 font-mono text-[11px] text-foreground"
+              >
+                <option value="ALL">Visão geral</option>
+                {destinations.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.city_name}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value)}
+                className="rounded-lg border border-input bg-card px-2 py-2 font-mono text-[11px] text-foreground"
+              >
+                <option value="all">Todos os status</option>
+                {STATUS_ORDER.map((s) => (
+                  <option
+                    key={s}
+                    value={s}
+                    style={{ backgroundColor: STATUS_OPTION_COLORS[s].bg, color: STATUS_OPTION_COLORS[s].fg }}
+                  >
+                    {STATUS_CONFIG[s].label}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={categoryFilter}
+                onChange={(e) => setCategoryFilter(e.target.value)}
+                className="rounded-lg border border-input bg-card px-2 py-2 font-mono text-[11px] text-foreground"
+              >
+                <option value="all">Todos os tipos</option>
+                <option value="activity">Passeio</option>
+                <option value="transport">Transporte</option>
+                <option value="accommodation">Hospedagem</option>
+              </select>
+            </div>
+
+            {/* Timeline cronológica (hospedagem + passeios + transporte) */}
+            <div className="mt-4 flex flex-col gap-4">
+              {timelineByDay.length === 0 && (
+                <p className="rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
+                  Nada planejado para {activeDestId === 'ALL' ? 'a viagem' : activeDest?.city_name ?? 'este destino'}{' '}
+                  ainda.
+                </p>
+              )}
+              {timelineByDay.map(({ date, items }) => {
+                const isAccordion = activeDestId === 'ALL'
+                const isExpanded = !isAccordion || expandedDays.has(date)
+                return (
+                  <div key={date}>
+                    <button
+                      type="button"
+                      onClick={() => isAccordion && toggleDay(date)}
+                      className={`mb-1.5 flex w-full items-center justify-between font-mono text-[11px] uppercase tracking-wide text-muted-foreground ${
+                        isAccordion ? 'cursor-pointer' : 'cursor-default'
+                      }`}
+                    >
+                      <span>
+                        {date === 'Sem data' ? date : formatDate(date)} · {items.length}{' '}
+                        {items.length === 1 ? 'item' : 'itens'}
+                      </span>
+                      {isAccordion &&
+                        (isExpanded ? (
+                          <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                        ) : (
+                          <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                        ))}
+                    </button>
+
+                    {isExpanded && (
+                      <div className="flex flex-col gap-2">
+                        {items.map((item, idx) => {
+                          const isAccommodation = item.kind === 'accommodation'
+                          return (
+                            <div
+                              key={`${item.kind}-${item.data.id ?? idx}`}
+                              className={`flex items-start justify-between gap-2 rounded-xl border border-border bg-card ${
+                                isAccommodation ? 'p-2' : 'p-3'
+                              }`}
+                            >
+                              <div className="flex items-start gap-2">
+                                <div className="flex flex-col items-center gap-1">
+                                  {item.kind === 'activity' && (
+                                    <Ticket className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+                                  )}
+                                  {item.kind === 'transport' && (
+                                    <Plane className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+                                  )}
+                                  {isAccommodation && (
+                                    <Hotel className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
+                                  )}
+                                  {item.kind === 'activity' && (
+                                    <a
+                                      href={buildMapsSearchUrl(
+                                        `${item.data.activity_name} ${
+                                          activeDestId === 'ALL'
+                                            ? destById[item.data.destination_id] ?? ''
+                                            : activeDest?.city_name ?? ''
+                                        }`
+                                      )}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      onClick={(e) => e.stopPropagation()}
+                                      title="Como chegar"
+                                      aria-label={`Como chegar: ${item.data.activity_name}`}
+                                      className="flex flex-col items-center gap-0.5 rounded-lg px-1 py-1 text-primary transition-colors hover:bg-primary/10 active:bg-primary/15"
+                                    >
+                                      <MapPin className="h-3.5 w-3.5" aria-hidden="true" />
+                                      <span className="font-mono text-[8px] uppercase leading-none tracking-wide">
+                                        Mapa
+                                      </span>
+                                    </a>
+                                  )}
+                                  {item.kind === 'transport' && (
+                                    <a
+                                      href={buildMapsSearchUrl(
+                                        item.data.origin_station || item.data.origin_city
+                                      )}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      onClick={(e) => e.stopPropagation()}
+                                      title="Como chegar (local de partida)"
+                                      aria-label={`Como chegar ao local de partida: ${
+                                        item.data.origin_station || item.data.origin_city
+                                      }`}
+                                      className="flex flex-col items-center gap-0.5 rounded-lg px-1 py-1 text-primary transition-colors hover:bg-primary/10 active:bg-primary/15"
+                                    >
+                                      <MapPin className="h-3.5 w-3.5" aria-hidden="true" />
+                                      <span className="font-mono text-[8px] uppercase leading-none tracking-wide">
+                                        Mapa
+                                      </span>
+                                    </a>
+                                  )}
+                                  {isAccommodation && (
+                                    <a
+                                      href={buildMapsSearchUrl(
+                                        `${item.data.hotel_name} ${
+                                          activeDestId === 'ALL'
+                                            ? destById[item.data.destination_id] ?? ''
+                                            : activeDest?.city_name ?? ''
+                                        }`
+                                      )}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      onClick={(e) => e.stopPropagation()}
+                                      title="Como chegar"
+                                      aria-label={`Como chegar: ${item.data.hotel_name}`}
+                                      className="flex flex-col items-center gap-0.5 rounded-lg px-1 py-0.5 text-primary transition-colors hover:bg-primary/10 active:bg-primary/15"
+                                    >
+                                      <MapPin className="h-3 w-3" aria-hidden="true" />
+                                    </a>
+                                  )}
+                                </div>
+                                <div>
+                                  <p className={`font-medium text-foreground ${isAccommodation ? 'text-sm' : ''}`}>
+                                    {item.kind === 'activity' && item.data.activity_name}
+                                    {item.kind === 'transport' &&
+                                      `${item.data.origin_city} → ${item.data.destination_city}`}
+                                    {isAccommodation && item.data.hotel_name}
+                                  </p>
+                                  <p className="font-mono text-[11px] text-muted-foreground">
+                                    {activeDestId === 'ALL' &&
+                                      (item.kind === 'activity' || isAccommodation) &&
+                                      destById[item.data.destination_id]
+                                      ? `${destById[item.data.destination_id]} · `
+                                      : ''}
+                                    {isAccommodation
+                                      ? `${formatDate(item.data.check_in)} → ${formatDate(item.data.check_out)}`
+                                      : item.time ?? '—'}
+                                    {item.kind === 'activity' && item.data.shift ? ` · ${item.data.shift}` : ''}
+                                    {!isAccommodation &&
+                                      item.data.cost_per_person_eur != null &&
+                                      ` · ${formatEUR(item.data.cost_per_person_eur)}/pessoa`}
+                                    {isAccommodation &&
+                                      item.data.total_cost_eur != null &&
+                                      ` · ${formatEUR(item.data.total_cost_eur)}`}
+                                  </p>
+                                  {item.kind === 'transport' &&
+                                    (item.data.origin_station || item.data.destination_station) && (
+                                      <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">
+                                        {item.data.origin_station || '—'} → {item.data.destination_station || '—'}
+                                      </p>
+                                    )}
+                                  {item.kind === 'activity' && item.data.booking_rule && (
+                                    <p className="mt-1 inline-flex items-center gap-1 rounded-md bg-accent/15 px-1.5 py-0.5 font-mono text-[10px] text-accent">
+                                      <AlertCircle className="h-3 w-3 shrink-0" aria-hidden="true" />
+                                      {item.data.booking_rule}
+                                    </p>
+                                  )}
+                                  {item.kind === 'activity' && item.data.ticket_url && (
+                                    <a
+                                      href={item.data.ticket_url}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="mt-1 inline-flex items-center gap-1 font-mono text-[10px] text-primary underline underline-offset-2"
+                                    >
+                                      <ExternalLink className="h-3 w-3 shrink-0" aria-hidden="true" />
+                                      Abrir ingresso
+                                    </a>
+                                  )}
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-1">
+                                <StatusBadge
+                                  status={item.data.status}
+                                  onChange={(newStatus) =>
+                                    handleStatusChange(
+                                      item.kind === 'activity'
+                                        ? 'itinerary_activities'
+                                        : item.kind === 'transport'
+                                        ? 'transport'
+                                        : 'accommodations',
+                                      item.data.id,
+                                      newStatus
+                                    )
+                                  }
+                                />
+                                {!isAccommodation && (
+                                  <button
+                                    onClick={() => setEditingItem({ kind: item.kind, data: item.data })}
+                                    aria-label="Editar"
+                                    className="rounded-full p-1 text-muted-foreground hover:bg-muted"
+                                  >
+                                    <Pencil className="h-3.5 w-3.5" />
+                                  </button>
+                                )}
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
                   </div>
                 )
               })}
@@ -939,196 +1435,129 @@ function Dashboard({ session }) {
           </section>
         )}
 
-        {/* Tabs de destino */}
-        <section aria-labelledby="roteiro-heading">
-          <h2 id="roteiro-heading" className="mb-2 flex items-center gap-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground">
-            <MapPin className="h-3.5 w-3.5" /> Roteiro
-          </h2>
-          <div className="-mx-4 flex gap-2 overflow-x-auto px-4 pb-1">
-            <button
-              onClick={() => setActiveDestId('ALL')}
-              className={`shrink-0 rounded-full border px-3.5 py-1.5 font-mono text-xs uppercase tracking-wide transition-colors ${
-                activeDestId === 'ALL'
-                  ? 'border-primary bg-primary text-primary-foreground'
-                  : 'border-border bg-card text-muted-foreground'
-              }`}
-            >
-              Visão geral
-            </button>
-            {destinations.map((d) => (
-              <button
-                key={d.id}
-                onClick={() => setActiveDestId(d.id)}
-                className={`shrink-0 rounded-full border px-3.5 py-1.5 font-mono text-xs uppercase tracking-wide transition-colors ${
-                  d.id === activeDestId
-                    ? 'border-primary bg-primary text-primary-foreground'
-                    : 'border-border bg-card text-muted-foreground'
-                }`}
-              >
-                {d.city_name}
-                {d.is_bate_volta && ' •'}
-              </button>
-            ))}
-          </div>
-
-          {/* Filtro por status */}
-          <div className="-mx-4 mt-2 flex gap-1.5 overflow-x-auto px-4 pb-1">
-            <button
-              onClick={() => setStatusFilter('all')}
-              className={`shrink-0 rounded-full border px-3 py-1 font-mono text-[10px] uppercase tracking-wide transition-colors ${
-                statusFilter === 'all'
-                  ? 'border-primary bg-primary text-primary-foreground'
-                  : 'border-border bg-card text-muted-foreground'
-              }`}
-            >
-              Todos
-            </button>
-            {STATUS_ORDER.map((s) => (
-              <button
-                key={s}
-                onClick={() => setStatusFilter(s)}
-                className={`shrink-0 rounded-full border px-3 py-1 font-mono text-[10px] uppercase tracking-wide transition-colors ${
-                  statusFilter === s
-                    ? 'border-primary bg-primary text-primary-foreground'
-                    : 'border-border bg-card text-muted-foreground'
-                }`}
-              >
-                {STATUS_CONFIG[s].label}
-              </button>
-            ))}
-          </div>
-
-          {/* Hospedagem do destino ativo (ou de todas, na Visão geral) */}
-          {filteredAccommodations.length > 0 && (
-            <div className="mt-3 flex flex-col gap-2">
-              {filteredAccommodations.map((acc) => (
-                <div key={acc.id} className="rounded-xl border border-border bg-card p-3">
-                  <div className="flex items-start justify-between gap-2">
-                    <div>
-                      <p className="font-medium text-foreground">{acc.hotel_name}</p>
-                      <p className="font-mono text-[11px] text-muted-foreground">
-                        {activeDestId === 'ALL' && destById[acc.destination_id]
-                          ? `${destById[acc.destination_id]} · `
-                          : ''}
-                        {formatDate(acc.check_in)} → {formatDate(acc.check_out)}
+        {/* ================= TELA 3 — GASTOS ================= */}
+        {view === 'gastos' && (
+          <div className="flex flex-col gap-6">
+            <section aria-labelledby="saldo-heading">
+              <h2 id="saldo-heading" className="mb-2 flex items-center gap-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground">
+                <Wallet className="h-3.5 w-3.5" /> Saldo do grupo
+              </h2>
+              <div className="grid grid-cols-2 gap-3">
+                {balances.length === 0 && (
+                  <p className="col-span-2 rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
+                    Nenhum viajante cadastrado ainda.
+                  </p>
+                )}
+                {balances.map((b) => {
+                  const isPositive = b.balance >= 0
+                  return (
+                    <div key={b.name} className="rounded-xl border border-border bg-card p-3">
+                      <p className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">{b.name}</p>
+                      <p className="font-display text-xl font-semibold text-foreground">{formatEUR(b.totalPaid)}</p>
+                      <p className={`font-mono text-[11px] ${isPositive ? 'text-secondary-foreground' : 'text-accent'}`}>
+                        {isPositive ? 'a receber ' : 'a pagar '}
+                        {formatEUR(Math.abs(b.balance))}
                       </p>
                     </div>
-                    <StatusBadge
-                      status={acc.status}
-                      onChange={(newStatus) => handleStatusChange('accommodations', acc.id, newStatus)}
-                    />
-                  </div>
-                  <p className="mt-1 font-mono text-xs text-foreground">{formatEUR(acc.total_cost_eur)}</p>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Timeline cronológica (atividades + transporte) */}
-          <div className="mt-4 flex flex-col gap-4">
-            {timelineByDay.length === 0 && (
-              <p className="rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
-                Nada planejado para {activeDestId === 'ALL' ? 'a viagem' : activeDest?.city_name ?? 'este destino'}{' '}
-                ainda.
-              </p>
-            )}
-            {timelineByDay.map(({ date, items }) => (
-              <div key={date}>
-                <p className="mb-1.5 font-mono text-[11px] uppercase tracking-wide text-muted-foreground">
-                  {date === 'Sem data' ? date : formatDate(date)}
-                </p>
-                <div className="flex flex-col gap-2">
-                  {items.map((item, idx) => (
-                    <div
-                      key={`${item.kind}-${item.data.id ?? idx}`}
-                      className="flex items-start justify-between gap-2 rounded-xl border border-border bg-card p-3"
-                    >
-                      <div className="flex items-start gap-2">
-                        {item.kind === 'activity' ? (
-                          <Ticket className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
-                        ) : (
-                          <Plane className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
-                        )}
-                        <div>
-                          <p className="font-medium text-foreground">
-                            {item.kind === 'activity'
-                              ? item.data.activity_name
-                              : `${item.data.origin_city} → ${item.data.destination_city}`}
-                          </p>
-                          <p className="font-mono text-[11px] text-muted-foreground">
-                            {activeDestId === 'ALL' && item.kind === 'activity' && destById[item.data.destination_id]
-                              ? `${destById[item.data.destination_id]} · `
-                              : ''}
-                            {item.time ?? '—'}
-                            {item.kind === 'activity' && item.data.shift ? ` · ${item.data.shift}` : ''}
-                            {item.data.cost_per_person_eur != null &&
-                              ` · ${formatEUR(item.data.cost_per_person_eur)}/pessoa`}
-                          </p>
-                          {item.kind === 'activity' && item.data.booking_rule && (
-                            <p className="mt-1 inline-flex items-center gap-1 rounded-md bg-accent/15 px-1.5 py-0.5 font-mono text-[10px] text-accent">
-                              <AlertCircle className="h-3 w-3 shrink-0" aria-hidden="true" />
-                              {item.data.booking_rule}
-                            </p>
-                          )}
-                          {item.kind === 'activity' && item.data.ticket_url && (
-                            <a
-                              href={item.data.ticket_url}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              onClick={(e) => e.stopPropagation()}
-                              className="mt-1 inline-flex items-center gap-1 font-mono text-[10px] text-primary underline underline-offset-2"
-                            >
-                              <ExternalLink className="h-3 w-3 shrink-0" aria-hidden="true" />
-                              Abrir ingresso
-                            </a>
-                          )}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1">
-                        <StatusBadge
-                          status={item.data.status}
-                          onChange={(newStatus) =>
-                            handleStatusChange(
-                              item.kind === 'activity' ? 'itinerary_activities' : 'transport',
-                              item.data.id,
-                              newStatus
-                            )
-                          }
-                        />
-                        <button
-                          onClick={() => setEditingItem({ kind: item.kind, data: item.data })}
-                          aria-label="Editar"
-                          className="rounded-full p-1 text-muted-foreground hover:bg-muted"
-                        >
-                          <Pencil className="h-3.5 w-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
+                  )
+                })}
               </div>
-            ))}
+              <p className="mt-2 font-mono text-[10px] text-muted-foreground">
+                "Total pago" soma tudo que a pessoa desembolsou. "A receber/a pagar" considera só os gastos 50/50.
+              </p>
+            </section>
+
+            <section aria-labelledby="total-heading">
+              <h2 id="total-heading" className="mb-2 font-mono text-xs uppercase tracking-wide text-muted-foreground">
+                Total da viagem
+              </h2>
+              <p className="font-display text-4xl font-semibold text-foreground">{formatEUR(grandTotal)}</p>
+            </section>
+
+            <section aria-labelledby="categoria-heading">
+              <h2 id="categoria-heading" className="mb-2 font-mono text-xs uppercase tracking-wide text-muted-foreground">
+                Por categoria
+              </h2>
+              {categoryTotals.length === 0 && (
+                <p className="rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
+                  Nenhum gasto lançado ainda.
+                </p>
+              )}
+              <div className="flex flex-col gap-2.5">
+                {categoryTotals.map(([cat, amount]) => (
+                  <div key={cat} title={formatEUR(amount)}>
+                    <div className="mb-1 flex items-center justify-between font-mono text-[11px] text-foreground">
+                      <span>{cat}</span>
+                      <span className="text-muted-foreground">{formatEUR(amount)}</span>
+                    </div>
+                    <div className="h-2 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-2 rounded-full bg-primary transition-all"
+                        style={{ width: `${(amount / maxCategoryAmount) * 100}%` }}
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section aria-labelledby="lancamentos-heading">
+              <h2 id="lancamentos-heading" className="mb-2 font-mono text-xs uppercase tracking-wide text-muted-foreground">
+                Lançamentos
+              </h2>
+              {expenses.length === 0 && (
+                <p className="rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
+                  Nenhum gasto lançado ainda.
+                </p>
+              )}
+              <div className="flex flex-col gap-2">
+                {expenses.map((e) => {
+                  const splitLabel = splitTypeOptions.find((opt) => opt.value === e.split_type)?.label ?? e.split_type
+                  return (
+                    <div key={e.id} className="rounded-xl border border-border bg-card p-3">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <p className="font-medium text-foreground">{e.description}</p>
+                          <p className="font-mono text-[11px] text-muted-foreground">
+                            {e.category ?? 'Sem categoria'} · {formatDate(e.transaction_date)} · {e.paid_by}
+                          </p>
+                        </div>
+                        <p className="font-mono text-sm font-semibold text-foreground">{formatEUR(e.total_cost_eur)}</p>
+                      </div>
+                      <span className="mt-1.5 inline-flex items-center rounded-full border border-border bg-background px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                        {splitLabel}
+                      </span>
+                    </div>
+                  )
+                })}
+              </div>
+            </section>
           </div>
-        </section>
+        )}
       </main>
 
-      {/* Ações rápidas (mobile-first, fixas no rodapé) */}
+      {/* Ações rápidas (mobile-first, fixas no rodapé). Passeio/Transporte só
+          aparecem na tela Roteiro; Gasto aparece nas 3 telas. */}
       <div className="fixed bottom-0 left-0 right-0 z-10 border-t border-border bg-card/95 px-4 py-3 backdrop-blur">
         <div className="mx-auto flex max-w-2xl gap-2">
-          <button
-            onClick={() => setOpenSheet('activity')}
-            disabled={!activeDestId || activeDestId === 'ALL'}
-            title={activeDestId === 'ALL' ? 'Escolha uma cidade para adicionar um passeio' : undefined}
-            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-border bg-background px-3 py-2.5 font-mono text-xs uppercase tracking-wide text-foreground disabled:opacity-50"
-          >
-            <Plus className="h-3.5 w-3.5" /> Passeio
-          </button>
-          <button
-            onClick={() => setOpenSheet('transport')}
-            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-border bg-background px-3 py-2.5 font-mono text-xs uppercase tracking-wide text-foreground"
-          >
-            <Plus className="h-3.5 w-3.5" /> Transporte
-          </button>
+          {view === 'roteiro' && (
+            <>
+              <button
+                onClick={() => setOpenSheet('activity')}
+                disabled={!activeDestId || activeDestId === 'ALL'}
+                title={activeDestId === 'ALL' ? 'Escolha uma cidade para adicionar um passeio' : undefined}
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-border bg-background px-3 py-2.5 font-mono text-xs uppercase tracking-wide text-foreground disabled:opacity-50"
+              >
+                <Plus className="h-3.5 w-3.5" /> Passeio
+              </button>
+              <button
+                onClick={() => setOpenSheet('transport')}
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-border bg-background px-3 py-2.5 font-mono text-xs uppercase tracking-wide text-foreground"
+              >
+                <Plus className="h-3.5 w-3.5" /> Transporte
+              </button>
+            </>
+          )}
           <button
             onClick={() => setOpenSheet('expense')}
             className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-2.5 font-mono text-xs uppercase tracking-wide text-primary-foreground"
@@ -1158,6 +1587,13 @@ function Dashboard({ session }) {
               options: travelers.map((t) => t.name),
             },
             {
+              name: 'split_type',
+              label: 'Tipo de divisão',
+              type: 'select',
+              options: splitTypeOptions,
+              default: 'individual',
+            },
+            {
               name: 'status',
               label: 'Status',
               type: 'select',
@@ -1179,7 +1615,9 @@ function Dashboard({ session }) {
           onSubmit={handleAddTransport}
           fields={[
             { name: 'origin_city', label: 'Cidade de origem', required: true, default: activeDest?.city_name ?? '' },
+            { name: 'origin_station', label: 'Estação/aeroporto de saída (opcional)' },
             { name: 'destination_city', label: 'Cidade de destino', required: true },
+            { name: 'destination_station', label: 'Estação/aeroporto de chegada (opcional)' },
             { name: 'departure_date', label: 'Data de partida', type: 'date' },
             { name: 'departure_time', label: 'Hora de partida', type: 'time' },
             { name: 'arrival_time', label: 'Hora de chegada', type: 'time' },
@@ -1189,6 +1627,13 @@ function Dashboard({ session }) {
               label: 'Pago por (opcional — se vazio, vira compra individual sua)',
               type: 'select',
               options: travelers.map((t) => t.name),
+            },
+            {
+              name: 'split_type',
+              label: 'Tipo de divisão',
+              type: 'select',
+              options: splitTypeOptions,
+              default: 'individual',
             },
             {
               name: 'status',
@@ -1240,7 +1685,9 @@ function Dashboard({ session }) {
           onDelete={() => handleDeleteTransport(editingItem.data.id)}
           fields={[
             { name: 'origin_city', label: 'Cidade de origem', required: true },
+            { name: 'origin_station', label: 'Estação/aeroporto de saída (opcional)' },
             { name: 'destination_city', label: 'Cidade de destino', required: true },
+            { name: 'destination_station', label: 'Estação/aeroporto de chegada (opcional)' },
             { name: 'departure_date', label: 'Data de partida', type: 'date' },
             { name: 'departure_time', label: 'Hora de partida', type: 'time' },
             { name: 'arrival_time', label: 'Hora de chegada', type: 'time' },
@@ -1265,12 +1712,7 @@ function Dashboard({ session }) {
           fields={[
             { name: 'description', label: 'Descrição', required: true },
             { name: 'transaction_date', label: 'Data', type: 'date' },
-            {
-              name: 'category',
-              label: 'Categoria',
-              type: 'select',
-              options: ['Passeio', 'Transporte', 'Alimentação', 'Compras', 'Hospedagem'],
-            },
+            { name: 'category', label: 'Categoria', type: 'select', options: EXPENSE_CATEGORIES },
             { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number', required: true },
             {
               name: 'paid_by',
@@ -1280,10 +1722,10 @@ function Dashboard({ session }) {
             },
             {
               name: 'split_type',
-              label: 'Divisão',
+              label: 'Tipo de divisão',
               type: 'select',
-              options: ['igual', 'individual'],
-              default: 'igual',
+              options: splitTypeOptions,
+              default: 'individual',
             },
           ]}
         />
