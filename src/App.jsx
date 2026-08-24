@@ -505,6 +505,13 @@ function Dashboard({ session }) {
   const [alertRows, setAlertRows] = useState([])
   const [tripStartDate, setTripStartDate] = useState(null) // calculado, não vem de trips
   const [pendingCount, setPendingCount] = useState(0)
+  // Dados brutos de TODAS as cidades (independente do filtro da tela
+  // Roteiro), usados na estimativa de custos da tela Gastos.
+  const [overviewAccommodations, setOverviewAccommodations] = useState([])
+  const [overviewActivities, setOverviewActivities] = useState([])
+  const [overviewTransport, setOverviewTransport] = useState([])
+  const [includePendenteInEstimate, setIncludePendenteInEstimate] = useState(false)
+  const [includeAtrasadoInEstimate, setIncludeAtrasadoInEstimate] = useState(false)
   const [loading, setLoading] = useState(true)
   const [openSheet, setOpenSheet] = useState(null) // 'activity' | 'transport' | 'expense' | null
   const [editingItem, setEditingItem] = useState(null) // { kind: 'activity' | 'transport', data: {...} } | null
@@ -572,18 +579,15 @@ function Dashboard({ session }) {
   )
   const currentTravelerName = currentTraveler?.name ?? session.user.email
 
-  // Opções do "Tipo de divisão", com os nomes reais dos dois primeiros
-  // viajantes cadastrados (se ainda não houver dois, usa um rótulo genérico).
-  const splitTypeOptions = useMemo(() => {
-    const nameA = travelers[0]?.name ?? 'Pessoa A'
-    const nameB = travelers[1]?.name ?? 'Pessoa B'
-    return [
+  // Opções do "Tipo de divisão" — só 50/50 (compartilhado, entra no saldo) ou
+  // Individual (privado, não gera cobrança e some do extrato de quem não pagou).
+  const splitTypeOptions = useMemo(
+    () => [
       { value: 'igual', label: '50/50' },
-      { value: 'total_a', label: `100% ${nameA}` },
-      { value: 'total_b', label: `100% ${nameB}` },
-      { value: 'individual', label: 'Individual (privado)' },
-    ]
-  }, [travelers])
+      { value: 'individual', label: 'Individual' },
+    ],
+    []
+  )
 
   // Data de início da viagem, calculada como a menor data entre todas as
   // hospedagens/passeios/transportes já cadastrados em qualquer cidade —
@@ -632,32 +636,34 @@ function Dashboard({ session }) {
     }
   }, [trip, destinations])
 
-  // Contagem de itens pendentes (passeios + transportes + hospedagens de
-  // TODAS as cidades), usada no card clicável da tela Início.
+  // Busca hospedagens + passeios + transporte de TODAS as cidades (independente
+  // do filtro da tela Roteiro), usado tanto pra contagem de pendências (tela
+  // Início) quanto pra estimativa de custos do roteiro (tela Gastos).
   const loadPendingCount = useCallback(async () => {
     if (!trip || destinations.length === 0) {
       setPendingCount(0)
+      setOverviewAccommodations([])
+      setOverviewActivities([])
+      setOverviewTransport([])
       return
     }
     const destIds = destinations.map((d) => d.id)
     const [accRes, actRes, transRes] = await Promise.all([
-      supabase
-        .from('accommodations')
-        .select('id', { count: 'exact', head: true })
-        .in('destination_id', destIds)
-        .eq('status', 'pendente'),
-      supabase
-        .from('itinerary_activities')
-        .select('id', { count: 'exact', head: true })
-        .in('destination_id', destIds)
-        .eq('status', 'pendente'),
-      supabase
-        .from('transport')
-        .select('id', { count: 'exact', head: true })
-        .eq('trip_id', trip.id)
-        .eq('status', 'pendente'),
+      supabase.from('accommodations').select('*').in('destination_id', destIds),
+      supabase.from('itinerary_activities').select('*').in('destination_id', destIds),
+      supabase.from('transport').select('*').eq('trip_id', trip.id),
     ])
-    setPendingCount((accRes.count ?? 0) + (actRes.count ?? 0) + (transRes.count ?? 0))
+    const accData = accRes.data ?? []
+    const actData = actRes.data ?? []
+    const transData = transRes.data ?? []
+    setOverviewAccommodations(accData)
+    setOverviewActivities(actData)
+    setOverviewTransport(transData)
+    setPendingCount(
+      accData.filter((a) => a.status === 'pendente').length +
+        actData.filter((a) => a.status === 'pendente').length +
+        transData.filter((t) => t.status === 'pendente').length
+    )
   }, [trip, destinations])
 
   useEffect(() => {
@@ -787,8 +793,12 @@ function Dashboard({ session }) {
   // --- Handlers de insert -------------------------------------------------
 
   async function handleAddActivity(form) {
+    // Na Visão geral não existe uma cidade implícita, então o formulário
+    // pede pra escolher (campo `destination_id`). Numa aba de cidade
+    // específica, usa a cidade que já está selecionada.
+    const destinationId = activeDestId === 'ALL' ? form.destination_id : activeDestId
     const { error } = await supabase.from('itinerary_activities').insert({
-      destination_id: activeDestId,
+      destination_id: destinationId,
       activity_name: form.activity_name,
       assigned_date: form.assigned_date || null,
       shift: form.shift || null,
@@ -862,8 +872,11 @@ function Dashboard({ session }) {
   }
 
   // --- Handlers de edição / exclusão --------------------------------------
-  // Não recriam gasto automático na edição (só o insert original faz isso),
-  // pra evitar duplicar lançamentos no saldo a cada vez que algo é editado.
+  // Os campos "Pago por" / "Tipo de divisão" começam em branco toda vez que
+  // a edição abre (não vêm de nenhuma coluna salva). Se a pessoa deixar em
+  // branco, editar só atualiza os dados normais, sem mexer no financeiro —
+  // só lança um gasto novo se ela preencher "Pago por" explicitamente
+  // *nessa* edição, evitando duplicar o gasto criado na hora do cadastro.
 
   async function handleUpdateActivity(id, form) {
     const { error } = await supabase
@@ -881,6 +894,18 @@ function Dashboard({ session }) {
       })
       .eq('id', id)
     if (error) throw error
+
+    if (form.paid_by?.trim()) {
+      await maybeLogExpense({
+        paidBy: form.paid_by,
+        splitType: form.split_type,
+        costPerPerson: form.cost_per_person_eur,
+        date: form.assigned_date,
+        description: `Passeio: ${form.activity_name}`,
+        category: 'Passeio',
+      })
+    }
+
     await loadItineraryData(activeDestId)
     await loadPendingCount()
   }
@@ -909,6 +934,18 @@ function Dashboard({ session }) {
       })
       .eq('id', id)
     if (error) throw error
+
+    if (form.paid_by?.trim()) {
+      await maybeLogExpense({
+        paidBy: form.paid_by,
+        splitType: form.split_type,
+        costPerPerson: form.cost_per_person_eur,
+        date: form.departure_date,
+        description: `Transporte: ${form.origin_city} → ${form.destination_city}`,
+        category: 'Transporte',
+      })
+    }
+
     await loadItineraryData(activeDestId)
     await loadPendingCount()
   }
@@ -987,6 +1024,14 @@ function Dashboard({ session }) {
       }))
   }, [filteredAccommodations, filteredActivities, filteredTransport])
 
+  // Usado pelo botão "Expandir tudo" no topo da tela Roteiro (só relevante
+  // no modo accordion, ou seja, na Visão geral).
+  const allTimelineDates = useMemo(() => timelineByDay.map((d) => d.date), [timelineByDay])
+  const allDaysExpanded = allTimelineDates.length > 0 && allTimelineDates.every((d) => expandedDays.has(d))
+  function toggleExpandAll() {
+    setExpandedDays(allDaysExpanded ? new Set() : new Set(allTimelineDates))
+  }
+
   const urgentAlerts = useMemo(
     () => alertRows.filter((row) => (row.days_remaining ?? daysUntil(row.cancellation_deadline)) <= 7),
     [alertRows]
@@ -1038,6 +1083,38 @@ function Dashboard({ session }) {
     () => Math.max(1, ...categoryTotals.map(([, amount]) => amount)),
     [categoryTotals]
   )
+
+  // Estimativa de custo com base nos pontos do roteiro (passeios, transportes
+  // e hospedagens de TODAS as cidades) — independente de já ter sido lançado
+  // um gasto de verdade ou não. Por padrão só soma "confirmado"; os
+  // checkboxes na tela de Gastos permitem incluir "pendente" e "atrasado".
+  const estimateStatuses = useMemo(() => {
+    const set = new Set(['confirmado'])
+    if (includePendenteInEstimate) set.add('pendente')
+    if (includeAtrasadoInEstimate) set.add('atrasado')
+    return set
+  }, [includePendenteInEstimate, includeAtrasadoInEstimate])
+
+  const roteiroEstimateTotal = useMemo(() => {
+    const travelerCount = Math.max(travelers.length, 1)
+    let total = 0
+    for (const a of overviewActivities) {
+      if (estimateStatuses.has(a.status) && a.cost_per_person_eur != null) {
+        total += Number(a.cost_per_person_eur) * travelerCount
+      }
+    }
+    for (const t of overviewTransport) {
+      if (estimateStatuses.has(t.status) && t.cost_per_person_eur != null) {
+        total += Number(t.cost_per_person_eur) * travelerCount
+      }
+    }
+    for (const acc of overviewAccommodations) {
+      if (estimateStatuses.has(acc.status) && acc.total_cost_eur != null) {
+        total += Number(acc.total_cost_eur)
+      }
+    }
+    return total
+  }, [overviewActivities, overviewTransport, overviewAccommodations, estimateStatuses, travelers])
 
   // Contagem regressiva mostrada na tela Início
   const countdownLabel = useMemo(() => {
@@ -1123,10 +1200,10 @@ function Dashboard({ session }) {
           <div className="flex flex-col items-center gap-8 px-2 pt-10 text-center">
             <div>
               <p className="font-mono text-xs uppercase tracking-wide text-muted-foreground">Cartão Postal</p>
-              <h1 className="font-display text-3xl font-semibold text-foreground">{trip.title}</h1>
+              <h1 className="font-display text-4xl font-semibold text-foreground sm:text-5xl">{trip.title}</h1>
             </div>
 
-            <p className="font-display text-4xl font-semibold leading-tight text-primary sm:text-5xl">
+            <p className="font-display text-5xl font-semibold leading-tight text-primary sm:text-6xl">
               {countdownLabel}
             </p>
 
@@ -1137,7 +1214,7 @@ function Dashboard({ session }) {
                 setCategoryFilter('all')
                 setView('roteiro')
               }}
-              className="rounded-full border border-accent/40 bg-accent/10 px-4 py-2 font-mono text-xs uppercase tracking-wide text-accent"
+              className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground underline underline-offset-2"
             >
               {pendingCount} {pendingCount === 1 ? 'pendência' : 'pendências'}
             </button>
@@ -1166,27 +1243,26 @@ function Dashboard({ session }) {
                 })}
               </div>
             )}
-
-            <button
-              onClick={() => {
-                setActiveDestId('ALL')
-                setStatusFilter('all')
-                setCategoryFilter('all')
-                setView('roteiro')
-              }}
-              className="mt-4 w-full rounded-lg border border-border bg-card py-3 font-mono text-xs uppercase tracking-wide text-foreground"
-            >
-              Ver Tudo
-            </button>
           </div>
         )}
 
         {/* ================= TELA 2 — ROTEIRO ================= */}
         {view === 'roteiro' && (
           <section aria-labelledby="roteiro-heading">
-            <h2 id="roteiro-heading" className="mb-2 flex items-center gap-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground">
-              <MapPin className="h-3.5 w-3.5" /> Roteiro
-            </h2>
+            <div className="mb-2 flex items-center justify-between">
+              <h2 id="roteiro-heading" className="flex items-center gap-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground">
+                <MapPin className="h-3.5 w-3.5" /> Roteiro
+              </h2>
+              {activeDestId === 'ALL' && allTimelineDates.length > 0 && (
+                <button
+                  type="button"
+                  onClick={toggleExpandAll}
+                  className="font-mono text-[10px] uppercase tracking-wide text-primary underline underline-offset-2"
+                >
+                  {allDaysExpanded ? 'Recolher tudo' : 'Expandir tudo'}
+                </button>
+              )}
+            </div>
 
             {/* 3 filtros lado a lado: Cidade / Status / Tipo */}
             <div className="grid grid-cols-3 gap-2">
@@ -1472,6 +1548,49 @@ function Dashboard({ session }) {
                 Total da viagem
               </h2>
               <p className="font-display text-4xl font-semibold text-foreground">{formatEUR(grandTotal)}</p>
+              <p className="mt-1 font-mono text-[10px] text-muted-foreground">
+                Soma dos gastos já lançados no extrato abaixo.
+              </p>
+            </section>
+
+            <section aria-labelledby="estimativa-heading">
+              <h2
+                id="estimativa-heading"
+                className="mb-2 font-mono text-xs uppercase tracking-wide text-muted-foreground"
+              >
+                Estimativa do roteiro
+              </h2>
+              <p className="font-display text-3xl font-semibold text-foreground">
+                {formatEUR(roteiroEstimateTotal)}
+              </p>
+              <p className="mt-1 font-mono text-[10px] text-muted-foreground">
+                Soma dos custos de passeios, transportes e hospedagens cadastrados, por status — independente de já
+                ter virado gasto lançado.
+              </p>
+              <div className="mt-2 flex flex-col gap-1.5">
+                <label className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
+                  <input type="checkbox" checked readOnly className="accent-primary" />
+                  Confirmado (sempre incluído)
+                </label>
+                <label className="flex items-center gap-2 font-mono text-[11px] text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={includePendenteInEstimate}
+                    onChange={(e) => setIncludePendenteInEstimate(e.target.checked)}
+                    className="accent-primary"
+                  />
+                  Somar pendente
+                </label>
+                <label className="flex items-center gap-2 font-mono text-[11px] text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={includeAtrasadoInEstimate}
+                    onChange={(e) => setIncludeAtrasadoInEstimate(e.target.checked)}
+                    className="accent-primary"
+                  />
+                  Somar atrasado
+                </label>
+              </div>
             </section>
 
             <section aria-labelledby="categoria-heading">
@@ -1544,8 +1663,8 @@ function Dashboard({ session }) {
             <>
               <button
                 onClick={() => setOpenSheet('activity')}
-                disabled={!activeDestId || activeDestId === 'ALL'}
-                title={activeDestId === 'ALL' ? 'Escolha uma cidade para adicionar um passeio' : undefined}
+                disabled={destinations.length === 0}
+                title={destinations.length === 0 ? 'Cadastre uma cidade primeiro' : undefined}
                 className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-border bg-background px-3 py-2.5 font-mono text-xs uppercase tracking-wide text-foreground disabled:opacity-50"
               >
                 <Plus className="h-3.5 w-3.5" /> Passeio
@@ -1570,11 +1689,22 @@ function Dashboard({ session }) {
       {/* Sheets de criação */}
       {openSheet === 'activity' && (
         <QuickAddSheet
-          title={`Novo passeio em ${activeDest?.city_name ?? ''}`}
+          title={activeDestId === 'ALL' ? 'Novo passeio' : `Novo passeio em ${activeDest?.city_name ?? ''}`}
           icon={Ticket}
           onClose={() => setOpenSheet(null)}
           onSubmit={handleAddActivity}
           fields={[
+            ...(activeDestId === 'ALL'
+              ? [
+                  {
+                    name: 'destination_id',
+                    label: 'Cidade',
+                    type: 'select',
+                    options: destinations.map((d) => ({ value: d.id, label: d.city_name })),
+                    required: true,
+                  },
+                ]
+              : []),
             { name: 'activity_name', label: 'Nome do passeio', required: true },
             { name: 'assigned_date', label: 'Data', type: 'date' },
             { name: 'shift', label: 'Turno', type: 'select', options: ['Manhã', 'Tarde', 'Noite'] },
@@ -1663,6 +1793,19 @@ function Dashboard({ session }) {
             { name: 'exact_time', label: 'Horário exato', type: 'time' },
             { name: 'cost_per_person_eur', label: 'Custo por pessoa (EUR)', type: 'number' },
             {
+              name: 'paid_by',
+              label: 'Lançar gasto agora: pago por (opcional)',
+              type: 'select',
+              options: travelers.map((t) => t.name),
+            },
+            {
+              name: 'split_type',
+              label: 'Tipo de divisão do gasto',
+              type: 'select',
+              options: splitTypeOptions,
+              default: 'individual',
+            },
+            {
               name: 'status',
               label: 'Status',
               type: 'select',
@@ -1692,6 +1835,19 @@ function Dashboard({ session }) {
             { name: 'departure_time', label: 'Hora de partida', type: 'time' },
             { name: 'arrival_time', label: 'Hora de chegada', type: 'time' },
             { name: 'cost_per_person_eur', label: 'Custo por pessoa (EUR)', type: 'number' },
+            {
+              name: 'paid_by',
+              label: 'Lançar gasto agora: pago por (opcional)',
+              type: 'select',
+              options: travelers.map((t) => t.name),
+            },
+            {
+              name: 'split_type',
+              label: 'Tipo de divisão do gasto',
+              type: 'select',
+              options: splitTypeOptions,
+              default: 'individual',
+            },
             {
               name: 'status',
               label: 'Status',
