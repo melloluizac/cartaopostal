@@ -760,30 +760,40 @@ function Dashboard({ session }) {
     refreshFinancials()
   }, [refreshFinancials])
 
-  // Se a pessoa preencheu custo por pessoa num passeio/transporte, lança
-  // automaticamente um gasto correspondente em expenses_ledger. "50/50"
-  // multiplica pelo nº de viajantes (é uma despesa compartilhada); os outros
-  // 3 tipos ficam só com o valor informado (não são divididos com ninguém).
-  async function maybeLogExpense({ paidBy, splitType, costPerPerson, date, description, category }) {
-    const perPerson = Number(costPerPerson)
-    if (!perPerson) return
+  // Lança um gasto em expenses_ledger com um valor TOTAL já calculado
+  // (usado por hospedagem, cujo total_cost_eur já é o valor cheio, e por
+  // maybeLogExpense depois de multiplicar o custo por pessoa).
+  async function logExpenseEntry({ paidBy, splitType, totalCost, date, description, category }) {
+    const cost = Number(totalCost)
+    if (!cost) return
 
     const finalPaidBy = paidBy?.trim() || currentTravelerName
     const finalSplitType = splitType || 'individual'
-    const totalCost = finalSplitType === 'igual' ? perPerson * Math.max(travelers.length, 1) : perPerson
 
     const { error } = await supabase.from('expenses_ledger').insert({
       trip_id: trip.id,
       transaction_date: date || todayIso(),
       description,
       category,
-      total_cost_eur: totalCost,
+      total_cost_eur: cost,
       paid_by: finalPaidBy,
       split_type: finalSplitType,
       created_by: session.user.id,
     })
     if (error) throw error
     await refreshFinancials()
+  }
+
+  // Se a pessoa preencheu custo por pessoa num passeio/transporte, lança
+  // automaticamente um gasto correspondente em expenses_ledger. "50/50"
+  // multiplica pelo nº de viajantes (é uma despesa compartilhada); "Individual"
+  // fica só com o valor informado (não é dividido com ninguém).
+  async function maybeLogExpense({ paidBy, splitType, costPerPerson, date, description, category }) {
+    const perPerson = Number(costPerPerson)
+    if (!perPerson) return
+    const finalSplitType = splitType || 'individual'
+    const totalCost = finalSplitType === 'igual' ? perPerson * Math.max(travelers.length, 1) : perPerson
+    await logExpenseEntry({ paidBy, splitType, totalCost, date, description, category })
   }
 
   // Atualiza o status de uma linha (hospedagem, passeio ou transporte) ao
@@ -960,6 +970,72 @@ function Dashboard({ session }) {
 
   async function handleDeleteTransport(id) {
     const { error } = await supabase.from('transport').delete().eq('id', id)
+    if (error) throw error
+    await loadItineraryData(activeDestId)
+    await loadPendingCount()
+  }
+
+  async function handleAddAccommodation(form) {
+    const destinationId = activeDestId === 'ALL' ? form.destination_id : activeDestId
+    const { error } = await supabase.from('accommodations').insert({
+      destination_id: destinationId,
+      hotel_name: form.hotel_name,
+      check_in: form.check_in || null,
+      check_out: form.check_out || null,
+      total_cost_eur: form.total_cost_eur ? Number(form.total_cost_eur) : null,
+      status: form.status || 'planejando',
+      cancellation_deadline: form.cancellation_deadline || null,
+      booking_link: form.booking_link || null,
+      comments: form.comments || null,
+    })
+    if (error) throw error
+
+    await logExpenseEntry({
+      paidBy: form.paid_by,
+      splitType: form.split_type,
+      totalCost: form.total_cost_eur ? Number(form.total_cost_eur) : 0,
+      date: form.check_in,
+      description: `Hospedagem: ${form.hotel_name}`,
+      category: 'Hospedagem',
+    })
+
+    await loadItineraryData(activeDestId)
+    await loadPendingCount()
+  }
+
+  async function handleUpdateAccommodation(id, form) {
+    const { error } = await supabase
+      .from('accommodations')
+      .update({
+        hotel_name: form.hotel_name,
+        check_in: form.check_in || null,
+        check_out: form.check_out || null,
+        total_cost_eur: form.total_cost_eur ? Number(form.total_cost_eur) : null,
+        status: form.status || 'planejando',
+        cancellation_deadline: form.cancellation_deadline || null,
+        booking_link: form.booking_link || null,
+        comments: form.comments || null,
+      })
+      .eq('id', id)
+    if (error) throw error
+
+    if (form.paid_by?.trim()) {
+      await logExpenseEntry({
+        paidBy: form.paid_by,
+        splitType: form.split_type,
+        totalCost: form.total_cost_eur ? Number(form.total_cost_eur) : 0,
+        date: form.check_in,
+        description: `Hospedagem: ${form.hotel_name}`,
+        category: 'Hospedagem',
+      })
+    }
+
+    await loadItineraryData(activeDestId)
+    await loadPendingCount()
+  }
+
+  async function handleDeleteAccommodation(id) {
+    const { error } = await supabase.from('accommodations').delete().eq('id', id)
     if (error) throw error
     await loadItineraryData(activeDestId)
     await loadPendingCount()
@@ -1497,15 +1573,13 @@ function Dashboard({ session }) {
                                     )
                                   }
                                 />
-                                {!isAccommodation && (
-                                  <button
-                                    onClick={() => setEditingItem({ kind: item.kind, data: item.data })}
-                                    aria-label="Editar"
-                                    className="rounded-full p-1 text-muted-foreground hover:bg-muted"
-                                  >
-                                    <Pencil className="h-3.5 w-3.5" />
-                                  </button>
-                                )}
+                                <button
+                                  onClick={() => setEditingItem({ kind: item.kind, data: item.data })}
+                                  aria-label="Editar"
+                                  className="rounded-full p-1 text-muted-foreground hover:bg-muted"
+                                >
+                                  <Pencil className="h-3.5 w-3.5" />
+                                </button>
                               </div>
                             </div>
                           )
@@ -1663,8 +1737,10 @@ function Dashboard({ session }) {
         )}
       </main>
 
-      {/* Ações rápidas (mobile-first, fixas no rodapé). Passeio/Transporte só
-          aparecem na tela Roteiro; Gasto aparece nas 3 telas. */}
+      {/* Ações rápidas (mobile-first, fixas no rodapé). Passeio/Transporte/
+          Hospedagem só aparecem na tela Roteiro; Gasto aparece nas 3 telas,
+          mas fica reduzido (só o ícone "+") quando está na tela Roteiro, já
+          que ali ele divide espaço com os outros três botões. */}
       <div className="fixed bottom-0 left-0 right-0 z-10 border-t border-border bg-card/95 px-4 py-3 backdrop-blur">
         <div className="mx-auto flex max-w-2xl gap-2">
           {view === 'roteiro' && (
@@ -1683,14 +1759,32 @@ function Dashboard({ session }) {
               >
                 <Plus className="h-3.5 w-3.5" /> Transporte
               </button>
+              <button
+                onClick={() => setOpenSheet('accommodation')}
+                disabled={destinations.length === 0}
+                title={destinations.length === 0 ? 'Cadastre uma cidade primeiro' : undefined}
+                className="flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-border bg-background px-3 py-2.5 font-mono text-xs uppercase tracking-wide text-foreground disabled:opacity-50"
+              >
+                <Plus className="h-3.5 w-3.5" /> Hospedagem
+              </button>
+              <button
+                onClick={() => setOpenSheet('expense')}
+                aria-label="Novo gasto"
+                title="Novo gasto"
+                className="flex shrink-0 items-center justify-center rounded-lg bg-primary px-3 py-2.5 text-primary-foreground"
+              >
+                <Plus className="h-3.5 w-3.5" />
+              </button>
             </>
           )}
-          <button
-            onClick={() => setOpenSheet('expense')}
-            className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-2.5 font-mono text-xs uppercase tracking-wide text-primary-foreground"
-          >
-            <Plus className="h-3.5 w-3.5" /> Gasto
-          </button>
+          {view !== 'roteiro' && (
+            <button
+              onClick={() => setOpenSheet('expense')}
+              className="flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-primary px-3 py-2.5 font-mono text-xs uppercase tracking-wide text-primary-foreground"
+            >
+              <Plus className="h-3.5 w-3.5" /> Gasto
+            </button>
+          )}
         </div>
       </div>
 
@@ -1785,6 +1879,55 @@ function Dashboard({ session }) {
         />
       )}
 
+      {openSheet === 'accommodation' && (
+        <QuickAddSheet
+          title={activeDestId === 'ALL' ? 'Nova hospedagem' : `Nova hospedagem em ${activeDest?.city_name ?? ''}`}
+          icon={Hotel}
+          onClose={() => setOpenSheet(null)}
+          onSubmit={handleAddAccommodation}
+          fields={[
+            ...(activeDestId === 'ALL'
+              ? [
+                  {
+                    name: 'destination_id',
+                    label: 'Cidade',
+                    type: 'select',
+                    options: destinations.map((d) => ({ value: d.id, label: d.city_name })),
+                    required: true,
+                  },
+                ]
+              : []),
+            { name: 'hotel_name', label: 'Nome do hotel', required: true },
+            { name: 'check_in', label: 'Check-in', type: 'date' },
+            { name: 'check_out', label: 'Check-out', type: 'date' },
+            { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number' },
+            {
+              name: 'paid_by',
+              label: 'Pago por (opcional — se vazio, vira compra individual sua)',
+              type: 'select',
+              options: travelers.map((t) => t.name),
+            },
+            {
+              name: 'split_type',
+              label: 'Tipo de divisão',
+              type: 'select',
+              options: splitTypeOptions,
+              default: 'individual',
+            },
+            {
+              name: 'status',
+              label: 'Status',
+              type: 'select',
+              options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
+              default: 'planejando',
+            },
+            { name: 'cancellation_deadline', label: 'Prazo de cancelamento', type: 'date' },
+            { name: 'booking_link', label: 'Link da reserva', type: 'url' },
+            { name: 'comments', label: 'Comentários', type: 'textarea' },
+          ]}
+        />
+      )}
+
       {/* Sheets de edição (abrem ao clicar no lápis de um item da timeline) */}
       {editingItem?.kind === 'activity' && (
         <QuickAddSheet
@@ -1862,6 +2005,45 @@ function Dashboard({ session }) {
               type: 'select',
               options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
             },
+            { name: 'comments', label: 'Comentários', type: 'textarea' },
+          ]}
+        />
+      )}
+
+      {editingItem?.kind === 'accommodation' && (
+        <QuickAddSheet
+          title="Editar hospedagem"
+          icon={Hotel}
+          onClose={() => setEditingItem(null)}
+          initialValues={editingItem.data}
+          onSubmit={(form) => handleUpdateAccommodation(editingItem.data.id, form)}
+          onDelete={() => handleDeleteAccommodation(editingItem.data.id)}
+          fields={[
+            { name: 'hotel_name', label: 'Nome do hotel', required: true },
+            { name: 'check_in', label: 'Check-in', type: 'date' },
+            { name: 'check_out', label: 'Check-out', type: 'date' },
+            { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number' },
+            {
+              name: 'paid_by',
+              label: 'Lançar gasto agora: pago por (opcional)',
+              type: 'select',
+              options: travelers.map((t) => t.name),
+            },
+            {
+              name: 'split_type',
+              label: 'Tipo de divisão do gasto',
+              type: 'select',
+              options: splitTypeOptions,
+              default: 'individual',
+            },
+            {
+              name: 'status',
+              label: 'Status',
+              type: 'select',
+              options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
+            },
+            { name: 'cancellation_deadline', label: 'Prazo de cancelamento', type: 'date' },
+            { name: 'booking_link', label: 'Link da reserva', type: 'url' },
             { name: 'comments', label: 'Comentários', type: 'textarea' },
           ]}
         />
