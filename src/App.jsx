@@ -584,15 +584,27 @@ function Dashboard({ session }) {
   )
   const currentTravelerName = currentTraveler?.name ?? session.user.email
 
-  // Opções do "Tipo de divisão" — só 50/50 (compartilhado, entra no saldo) ou
-  // Individual (privado, não gera cobrança e some do extrato de quem não pagou).
-  const splitTypeOptions = useMemo(
+  // Opções do dropdown único "Responsável pelo Pagamento": 'individual' (padrão
+  // — cada um paga o seu, sem gerar cobrança) ou o nome de um viajante
+  // (assume divisão igual entre TODOS os viajantes ativos, calculada
+  // dinamicamente por 1/N — não é mais um bloco fixo de 50/50).
+  const responsavelOptions = useMemo(
     () => [
-      { value: 'igual', label: '50/50' },
       { value: 'individual', label: 'Individual' },
+      ...travelers.map((t) => ({ value: t.name, label: t.name })),
     ],
-    []
+    [travelers]
   )
+
+  // Resolve o valor bruto do dropdown único em (paid_by, split_type) — o
+  // par que efetivamente é gravado no banco.
+  function resolveResponsavel(value) {
+    const isIndividual = !value || value === 'individual'
+    return {
+      paidBy: isIndividual ? currentTravelerName : value,
+      splitType: isIndividual ? 'individual' : 'igual',
+    }
+  }
 
   // Data de início da viagem, calculada como a menor data entre todas as
   // hospedagens/passeios/transportes já cadastrados em qualquer cidade —
@@ -760,40 +772,51 @@ function Dashboard({ session }) {
     refreshFinancials()
   }, [refreshFinancials])
 
-  // Lança um gasto em expenses_ledger com um valor TOTAL já calculado
-  // (usado por hospedagem, cujo total_cost_eur já é o valor cheio, e por
-  // maybeLogExpense depois de multiplicar o custo por pessoa).
-  async function logExpenseEntry({ paidBy, splitType, totalCost, date, description, category }) {
-    const cost = Number(totalCost)
-    if (!cost) return
+  // Cria OU atualiza o gasto vinculado a um item do roteiro (passeio,
+  // transporte ou hospedagem). Se `existingExpenseId` já existir, faz
+  // .update() nele em vez de duplicar; senão, faz .insert() e devolve o id
+  // criado, pra ser salvo de volta em `linked_expense_id` no item de origem.
+  // Se o custo total ficar zerado/vazio E não houver gasto prévio, não faz
+  // nada — é o cenário de "criei o card ainda sem saber o valor".
+  async function syncLinkedExpense({ existingExpenseId, totalCost, paidBy, splitType, date, description, category }) {
+    const cost = Number(totalCost) || 0
 
-    const finalPaidBy = paidBy?.trim() || currentTravelerName
-    const finalSplitType = splitType || 'individual'
+    if (existingExpenseId) {
+      const { error } = await supabase
+        .from('expenses_ledger')
+        .update({
+          total_cost_eur: cost,
+          paid_by: paidBy,
+          split_type: splitType,
+          transaction_date: date || todayIso(),
+          description,
+          category,
+        })
+        .eq('id', existingExpenseId)
+      if (error) throw error
+      await refreshFinancials()
+      return existingExpenseId
+    }
 
-    const { error } = await supabase.from('expenses_ledger').insert({
-      trip_id: trip.id,
-      transaction_date: date || todayIso(),
-      description,
-      category,
-      total_cost_eur: cost,
-      paid_by: finalPaidBy,
-      split_type: finalSplitType,
-      created_by: session.user.id,
-    })
+    if (!cost) return null
+
+    const { data, error } = await supabase
+      .from('expenses_ledger')
+      .insert({
+        trip_id: trip.id,
+        transaction_date: date || todayIso(),
+        description,
+        category,
+        total_cost_eur: cost,
+        paid_by: paidBy,
+        split_type: splitType,
+        created_by: session.user.id,
+      })
+      .select('id')
+      .single()
     if (error) throw error
     await refreshFinancials()
-  }
-
-  // Se a pessoa preencheu custo por pessoa num passeio/transporte, lança
-  // automaticamente um gasto correspondente em expenses_ledger. "50/50"
-  // multiplica pelo nº de viajantes (é uma despesa compartilhada); "Individual"
-  // fica só com o valor informado (não é dividido com ninguém).
-  async function maybeLogExpense({ paidBy, splitType, costPerPerson, date, description, category }) {
-    const perPerson = Number(costPerPerson)
-    if (!perPerson) return
-    const finalSplitType = splitType || 'individual'
-    const totalCost = finalSplitType === 'igual' ? perPerson * Math.max(travelers.length, 1) : perPerson
-    await logExpenseEntry({ paidBy, splitType, totalCost, date, description, category })
+    return data.id
   }
 
   // Atualiza o status de uma linha (hospedagem, passeio ou transporte) ao
@@ -815,74 +838,145 @@ function Dashboard({ session }) {
     // pede pra escolher (campo `destination_id`). Numa aba de cidade
     // específica, usa a cidade que já está selecionada.
     const destinationId = activeDestId === 'ALL' ? form.destination_id : activeDestId
-    const { error } = await supabase.from('itinerary_activities').insert({
-      destination_id: destinationId,
-      activity_name: form.activity_name,
-      assigned_date: form.assigned_date || null,
-      shift: form.shift || null,
-      exact_time: form.exact_time || null,
-      cost_per_person_eur: form.cost_per_person_eur ? Number(form.cost_per_person_eur) : null,
-      status: form.status || 'planejando',
-      booking_rule: form.booking_rule || null,
-      ticket_url: form.ticket_url || null,
-      notes: form.notes || null,
-    })
+    const { paidBy, splitType } = resolveResponsavel(form.responsavel)
+    const totalCost = form.total_cost_eur ? Number(form.total_cost_eur) : 0
+
+    const { data: inserted, error } = await supabase
+      .from('itinerary_activities')
+      .insert({
+        destination_id: destinationId,
+        activity_name: form.activity_name,
+        assigned_date: form.assigned_date || null,
+        shift: form.shift || null,
+        exact_time: form.exact_time || null,
+        total_cost_eur: totalCost || null,
+        paid_by: paidBy,
+        split_type: splitType,
+        status: form.status || 'planejando',
+        booking_rule: form.booking_rule || null,
+        ticket_url: form.ticket_url || null,
+        notes: form.notes || null,
+      })
+      .select('id')
+      .single()
     if (error) throw error
 
-    await maybeLogExpense({
-      paidBy: form.paid_by,
-      splitType: form.split_type,
-      costPerPerson: form.cost_per_person_eur,
-      date: form.assigned_date,
-      description: `Passeio: ${form.activity_name}`,
-      category: 'Passeio',
-    })
+    if (totalCost) {
+      const expenseId = await syncLinkedExpense({
+        existingExpenseId: null,
+        totalCost,
+        paidBy,
+        splitType,
+        date: form.assigned_date,
+        description: `Passeio: ${form.activity_name}`,
+        category: 'Passeio',
+      })
+      if (expenseId) {
+        await supabase.from('itinerary_activities').update({ linked_expense_id: expenseId }).eq('id', inserted.id)
+      }
+    }
 
     await loadItineraryData(activeDestId)
     await loadPendingCount()
   }
 
   async function handleAddTransport(form) {
-    const { error } = await supabase.from('transport').insert({
-      trip_id: trip.id,
-      origin_city: form.origin_city,
-      origin_station: form.origin_station || null,
-      destination_city: form.destination_city,
-      destination_station: form.destination_station || null,
-      departure_date: form.departure_date || null,
-      departure_time: form.departure_time || null,
-      arrival_time: form.arrival_time || null,
-      cost_per_person_eur: form.cost_per_person_eur ? Number(form.cost_per_person_eur) : null,
-      status: form.status || 'planejando',
-      comments: form.comments || null,
-    })
+    const { paidBy, splitType } = resolveResponsavel(form.responsavel)
+    const totalCost = form.total_cost_eur ? Number(form.total_cost_eur) : 0
+
+    const { data: inserted, error } = await supabase
+      .from('transport')
+      .insert({
+        trip_id: trip.id,
+        origin_city: form.origin_city,
+        origin_station: form.origin_station || null,
+        destination_city: form.destination_city,
+        destination_station: form.destination_station || null,
+        departure_date: form.departure_date || null,
+        departure_time: form.departure_time || null,
+        arrival_time: form.arrival_time || null,
+        total_cost_eur: totalCost || null,
+        paid_by: paidBy,
+        split_type: splitType,
+        status: form.status || 'planejando',
+        comments: form.comments || null,
+      })
+      .select('id')
+      .single()
     if (error) throw error
 
-    await maybeLogExpense({
-      paidBy: form.paid_by,
-      splitType: form.split_type,
-      costPerPerson: form.cost_per_person_eur,
-      date: form.departure_date,
-      description: `Transporte: ${form.origin_city} → ${form.destination_city}`,
-      category: 'Transporte',
-    })
+    if (totalCost) {
+      const expenseId = await syncLinkedExpense({
+        existingExpenseId: null,
+        totalCost,
+        paidBy,
+        splitType,
+        date: form.departure_date,
+        description: `Transporte: ${form.origin_city} → ${form.destination_city}`,
+        category: 'Transporte',
+      })
+      if (expenseId) {
+        await supabase.from('transport').update({ linked_expense_id: expenseId }).eq('id', inserted.id)
+      }
+    }
+
+    await loadItineraryData(activeDestId)
+    await loadPendingCount()
+  }
+
+  async function handleAddAccommodation(form) {
+    const destinationId = activeDestId === 'ALL' ? form.destination_id : activeDestId
+    const { paidBy, splitType } = resolveResponsavel(form.responsavel)
+    const totalCost = form.total_cost_eur ? Number(form.total_cost_eur) : 0
+
+    const { data: inserted, error } = await supabase
+      .from('accommodations')
+      .insert({
+        destination_id: destinationId,
+        hotel_name: form.hotel_name,
+        check_in: form.check_in || null,
+        check_out: form.check_out || null,
+        total_cost_eur: totalCost || null,
+        paid_by: paidBy,
+        split_type: splitType,
+        status: form.status || 'planejando',
+        cancellation_deadline: form.cancellation_deadline || null,
+        booking_link: form.booking_link || null,
+        comments: form.comments || null,
+      })
+      .select('id')
+      .single()
+    if (error) throw error
+
+    if (totalCost) {
+      const expenseId = await syncLinkedExpense({
+        existingExpenseId: null,
+        totalCost,
+        paidBy,
+        splitType,
+        date: form.check_in,
+        description: `Hospedagem: ${form.hotel_name}`,
+        category: 'Hospedagem',
+      })
+      if (expenseId) {
+        await supabase.from('accommodations').update({ linked_expense_id: expenseId }).eq('id', inserted.id)
+      }
+    }
 
     await loadItineraryData(activeDestId)
     await loadPendingCount()
   }
 
   async function handleAddExpense(form) {
-    const finalPaidBy = form.paid_by?.trim() || currentTravelerName
-    const finalSplitType = form.split_type || 'individual'
-
+    const { paidBy, splitType } = resolveResponsavel(form.responsavel)
     const { error } = await supabase.from('expenses_ledger').insert({
       trip_id: trip.id,
       transaction_date: form.transaction_date || todayIso(),
       description: form.description,
       category: form.category || null,
       total_cost_eur: form.total_cost_eur ? Number(form.total_cost_eur) : 0,
-      paid_by: finalPaidBy,
-      split_type: finalSplitType,
+      paid_by: paidBy,
+      split_type: splitType,
       created_by: session.user.id,
     })
     if (error) throw error
@@ -890,13 +984,15 @@ function Dashboard({ session }) {
   }
 
   // --- Handlers de edição / exclusão --------------------------------------
-  // Os campos "Pago por" / "Tipo de divisão" começam em branco toda vez que
-  // a edição abre (não vêm de nenhuma coluna salva). Se a pessoa deixar em
-  // branco, editar só atualiza os dados normais, sem mexer no financeiro —
-  // só lança um gasto novo se ela preencher "Pago por" explicitamente
-  // *nessa* edição, evitando duplicar o gasto criado na hora do cadastro.
+  // Diferente da versão anterior, editar SEMPRE sincroniza o financeiro: se
+  // já existe um gasto vinculado (linked_expense_id), atualiza esse gasto em
+  // vez de duplicar; se não existe ainda e agora há um valor total, cria um
+  // novo. Ao excluir o item, o gasto vinculado é excluído junto.
 
-  async function handleUpdateActivity(id, form) {
+  async function handleUpdateActivity(existing, form) {
+    const { paidBy, splitType } = resolveResponsavel(form.responsavel)
+    const totalCost = form.total_cost_eur ? Number(form.total_cost_eur) : 0
+
     const { error } = await supabase
       .from('itinerary_activities')
       .update({
@@ -904,38 +1000,49 @@ function Dashboard({ session }) {
         assigned_date: form.assigned_date || null,
         shift: form.shift || null,
         exact_time: form.exact_time || null,
-        cost_per_person_eur: form.cost_per_person_eur ? Number(form.cost_per_person_eur) : null,
+        total_cost_eur: totalCost || null,
+        paid_by: paidBy,
+        split_type: splitType,
         status: form.status || 'planejando',
         booking_rule: form.booking_rule || null,
         ticket_url: form.ticket_url || null,
         notes: form.notes || null,
       })
-      .eq('id', id)
+      .eq('id', existing.id)
     if (error) throw error
 
-    if (form.paid_by?.trim()) {
-      await maybeLogExpense({
-        paidBy: form.paid_by,
-        splitType: form.split_type,
-        costPerPerson: form.cost_per_person_eur,
-        date: form.assigned_date,
-        description: `Passeio: ${form.activity_name}`,
-        category: 'Passeio',
-      })
+    const expenseId = await syncLinkedExpense({
+      existingExpenseId: existing.linked_expense_id,
+      totalCost,
+      paidBy,
+      splitType,
+      date: form.assigned_date,
+      description: `Passeio: ${form.activity_name}`,
+      category: 'Passeio',
+    })
+    if (expenseId && expenseId !== existing.linked_expense_id) {
+      await supabase.from('itinerary_activities').update({ linked_expense_id: expenseId }).eq('id', existing.id)
     }
 
     await loadItineraryData(activeDestId)
     await loadPendingCount()
   }
 
-  async function handleDeleteActivity(id) {
-    const { error } = await supabase.from('itinerary_activities').delete().eq('id', id)
+  async function handleDeleteActivity(existing) {
+    const { error } = await supabase.from('itinerary_activities').delete().eq('id', existing.id)
     if (error) throw error
+    if (existing.linked_expense_id) {
+      await supabase.from('expenses_ledger').delete().eq('id', existing.linked_expense_id)
+      await refreshFinancials()
+    }
     await loadItineraryData(activeDestId)
     await loadPendingCount()
   }
 
-  async function handleUpdateTransport(id, form) {
+  async function handleUpdateTransport(existing, form) {
+    const { paidBy, splitType } = resolveResponsavel(form.responsavel)
+    const totalCost = form.total_cost_eur ? Number(form.total_cost_eur) : 0
+
     const { error } = await supabase
       .from('transport')
       .update({
@@ -946,97 +1053,88 @@ function Dashboard({ session }) {
         departure_date: form.departure_date || null,
         departure_time: form.departure_time || null,
         arrival_time: form.arrival_time || null,
-        cost_per_person_eur: form.cost_per_person_eur ? Number(form.cost_per_person_eur) : null,
+        total_cost_eur: totalCost || null,
+        paid_by: paidBy,
+        split_type: splitType,
         status: form.status || 'planejando',
         comments: form.comments || null,
       })
-      .eq('id', id)
+      .eq('id', existing.id)
     if (error) throw error
 
-    if (form.paid_by?.trim()) {
-      await maybeLogExpense({
-        paidBy: form.paid_by,
-        splitType: form.split_type,
-        costPerPerson: form.cost_per_person_eur,
-        date: form.departure_date,
-        description: `Transporte: ${form.origin_city} → ${form.destination_city}`,
-        category: 'Transporte',
-      })
+    const expenseId = await syncLinkedExpense({
+      existingExpenseId: existing.linked_expense_id,
+      totalCost,
+      paidBy,
+      splitType,
+      date: form.departure_date,
+      description: `Transporte: ${form.origin_city} → ${form.destination_city}`,
+      category: 'Transporte',
+    })
+    if (expenseId && expenseId !== existing.linked_expense_id) {
+      await supabase.from('transport').update({ linked_expense_id: expenseId }).eq('id', existing.id)
     }
 
     await loadItineraryData(activeDestId)
     await loadPendingCount()
   }
 
-  async function handleDeleteTransport(id) {
-    const { error } = await supabase.from('transport').delete().eq('id', id)
+  async function handleDeleteTransport(existing) {
+    const { error } = await supabase.from('transport').delete().eq('id', existing.id)
     if (error) throw error
+    if (existing.linked_expense_id) {
+      await supabase.from('expenses_ledger').delete().eq('id', existing.linked_expense_id)
+      await refreshFinancials()
+    }
     await loadItineraryData(activeDestId)
     await loadPendingCount()
   }
 
-  async function handleAddAccommodation(form) {
-    const destinationId = activeDestId === 'ALL' ? form.destination_id : activeDestId
-    const { error } = await supabase.from('accommodations').insert({
-      destination_id: destinationId,
-      hotel_name: form.hotel_name,
-      check_in: form.check_in || null,
-      check_out: form.check_out || null,
-      total_cost_eur: form.total_cost_eur ? Number(form.total_cost_eur) : null,
-      status: form.status || 'planejando',
-      cancellation_deadline: form.cancellation_deadline || null,
-      booking_link: form.booking_link || null,
-      comments: form.comments || null,
-    })
-    if (error) throw error
+  async function handleUpdateAccommodation(existing, form) {
+    const { paidBy, splitType } = resolveResponsavel(form.responsavel)
+    const totalCost = form.total_cost_eur ? Number(form.total_cost_eur) : 0
 
-    await logExpenseEntry({
-      paidBy: form.paid_by,
-      splitType: form.split_type,
-      totalCost: form.total_cost_eur ? Number(form.total_cost_eur) : 0,
-      date: form.check_in,
-      description: `Hospedagem: ${form.hotel_name}`,
-      category: 'Hospedagem',
-    })
-
-    await loadItineraryData(activeDestId)
-    await loadPendingCount()
-  }
-
-  async function handleUpdateAccommodation(id, form) {
     const { error } = await supabase
       .from('accommodations')
       .update({
         hotel_name: form.hotel_name,
         check_in: form.check_in || null,
         check_out: form.check_out || null,
-        total_cost_eur: form.total_cost_eur ? Number(form.total_cost_eur) : null,
+        total_cost_eur: totalCost || null,
+        paid_by: paidBy,
+        split_type: splitType,
         status: form.status || 'planejando',
         cancellation_deadline: form.cancellation_deadline || null,
         booking_link: form.booking_link || null,
         comments: form.comments || null,
       })
-      .eq('id', id)
+      .eq('id', existing.id)
     if (error) throw error
 
-    if (form.paid_by?.trim()) {
-      await logExpenseEntry({
-        paidBy: form.paid_by,
-        splitType: form.split_type,
-        totalCost: form.total_cost_eur ? Number(form.total_cost_eur) : 0,
-        date: form.check_in,
-        description: `Hospedagem: ${form.hotel_name}`,
-        category: 'Hospedagem',
-      })
+    const expenseId = await syncLinkedExpense({
+      existingExpenseId: existing.linked_expense_id,
+      totalCost,
+      paidBy,
+      splitType,
+      date: form.check_in,
+      description: `Hospedagem: ${form.hotel_name}`,
+      category: 'Hospedagem',
+    })
+    if (expenseId && expenseId !== existing.linked_expense_id) {
+      await supabase.from('accommodations').update({ linked_expense_id: expenseId }).eq('id', existing.id)
     }
 
     await loadItineraryData(activeDestId)
     await loadPendingCount()
   }
 
-  async function handleDeleteAccommodation(id) {
-    const { error } = await supabase.from('accommodations').delete().eq('id', id)
+  async function handleDeleteAccommodation(existing) {
+    const { error } = await supabase.from('accommodations').delete().eq('id', existing.id)
     if (error) throw error
+    if (existing.linked_expense_id) {
+      await supabase.from('expenses_ledger').delete().eq('id', existing.linked_expense_id)
+      await refreshFinancials()
+    }
     await loadItineraryData(activeDestId)
     await loadPendingCount()
   }
@@ -1056,6 +1154,16 @@ function Dashboard({ session }) {
     () => Object.fromEntries(destinations.map((d) => [d.id, d.city_name])),
     [destinations]
   )
+
+  // Custo por pessoa exibido na timeline: se o item é "Individual", o valor
+  // por pessoa é o próprio total (só a pessoa paga, por ela mesma). Se é
+  // "igual" (um viajante específico foi escolhido como responsável), divide
+  // pelo número de viajantes ativos — dinamicamente, não em blocos fixos.
+  function perPersonCost(row) {
+    if (row.total_cost_eur == null) return null
+    const total = Number(row.total_cost_eur)
+    return row.split_type === 'igual' ? total / Math.max(travelers.length, 1) : total
+  }
 
   const filteredAccommodations = useMemo(() => {
     let list = accommodations
@@ -1180,16 +1288,15 @@ function Dashboard({ session }) {
   }, [includePendenteInEstimate, includeAtrasadoInEstimate])
 
   const roteiroEstimateTotal = useMemo(() => {
-    const travelerCount = Math.max(travelers.length, 1)
     let total = 0
     for (const a of overviewActivities) {
-      if (estimateStatuses.has(a.status) && a.cost_per_person_eur != null) {
-        total += Number(a.cost_per_person_eur) * travelerCount
+      if (estimateStatuses.has(a.status) && a.total_cost_eur != null) {
+        total += Number(a.total_cost_eur)
       }
     }
     for (const t of overviewTransport) {
-      if (estimateStatuses.has(t.status) && t.cost_per_person_eur != null) {
-        total += Number(t.cost_per_person_eur) * travelerCount
+      if (estimateStatuses.has(t.status) && t.total_cost_eur != null) {
+        total += Number(t.total_cost_eur)
       }
     }
     for (const acc of overviewAccommodations) {
@@ -1198,7 +1305,7 @@ function Dashboard({ session }) {
       }
     }
     return total
-  }, [overviewActivities, overviewTransport, overviewAccommodations, estimateStatuses, travelers])
+  }, [overviewActivities, overviewTransport, overviewAccommodations, estimateStatuses])
 
   // Contagem regressiva mostrada na tela Início
   const countdownLabel = useMemo(() => {
@@ -1525,12 +1632,8 @@ function Dashboard({ session }) {
                                       ? `${formatDate(item.data.check_in)} → ${formatDate(item.data.check_out)}`
                                       : item.time ?? '—'}
                                     {item.kind === 'activity' && item.data.shift ? ` · ${item.data.shift}` : ''}
-                                    {!isAccommodation &&
-                                      item.data.cost_per_person_eur != null &&
-                                      ` · ${formatEUR(item.data.cost_per_person_eur)}/pessoa`}
-                                    {isAccommodation &&
-                                      item.data.total_cost_eur != null &&
-                                      ` · ${formatEUR(item.data.total_cost_eur)}`}
+                                    {item.data.total_cost_eur != null &&
+                                      ` · ${formatEUR(perPersonCost(item.data))}/pessoa`}
                                   </p>
                                   {item.kind === 'transport' &&
                                     (item.data.origin_station || item.data.destination_station) && (
@@ -1713,7 +1816,7 @@ function Dashboard({ session }) {
               )}
               <div className="flex flex-col gap-2">
                 {expenses.map((e) => {
-                  const splitLabel = splitTypeOptions.find((opt) => opt.value === e.split_type)?.label ?? e.split_type
+                  const splitLabel = e.split_type === 'igual' ? '50/50' : 'Individual'
                   return (
                     <div key={e.id} className="rounded-xl border border-border bg-card p-3">
                       <div className="flex items-start justify-between gap-2">
@@ -1811,18 +1914,12 @@ function Dashboard({ session }) {
             { name: 'assigned_date', label: 'Data', type: 'date' },
             { name: 'shift', label: 'Turno', type: 'select', options: ['Manhã', 'Tarde', 'Noite'] },
             { name: 'exact_time', label: 'Horário exato', type: 'time' },
-            { name: 'cost_per_person_eur', label: 'Custo por pessoa (EUR)', type: 'number' },
+            { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number' },
             {
-              name: 'paid_by',
-              label: 'Pago por (opcional — se vazio, vira compra individual sua)',
+              name: 'responsavel',
+              label: 'Responsável pelo Pagamento',
               type: 'select',
-              options: travelers.map((t) => t.name),
-            },
-            {
-              name: 'split_type',
-              label: 'Tipo de divisão',
-              type: 'select',
-              options: splitTypeOptions,
+              options: responsavelOptions,
               default: 'individual',
             },
             {
@@ -1853,18 +1950,12 @@ function Dashboard({ session }) {
             { name: 'departure_date', label: 'Data de partida', type: 'date' },
             { name: 'departure_time', label: 'Hora de partida', type: 'time' },
             { name: 'arrival_time', label: 'Hora de chegada', type: 'time' },
-            { name: 'cost_per_person_eur', label: 'Custo por pessoa (EUR)', type: 'number' },
+            { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number' },
             {
-              name: 'paid_by',
-              label: 'Pago por (opcional — se vazio, vira compra individual sua)',
+              name: 'responsavel',
+              label: 'Responsável pelo Pagamento',
               type: 'select',
-              options: travelers.map((t) => t.name),
-            },
-            {
-              name: 'split_type',
-              label: 'Tipo de divisão',
-              type: 'select',
-              options: splitTypeOptions,
+              options: responsavelOptions,
               default: 'individual',
             },
             {
@@ -1902,16 +1993,10 @@ function Dashboard({ session }) {
             { name: 'check_out', label: 'Check-out', type: 'date' },
             { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number' },
             {
-              name: 'paid_by',
-              label: 'Pago por (opcional — se vazio, vira compra individual sua)',
+              name: 'responsavel',
+              label: 'Responsável pelo Pagamento',
               type: 'select',
-              options: travelers.map((t) => t.name),
-            },
-            {
-              name: 'split_type',
-              label: 'Tipo de divisão',
-              type: 'select',
-              options: splitTypeOptions,
+              options: responsavelOptions,
               default: 'individual',
             },
             {
@@ -1934,26 +2019,23 @@ function Dashboard({ session }) {
           title="Editar passeio"
           icon={Ticket}
           onClose={() => setEditingItem(null)}
-          initialValues={editingItem.data}
-          onSubmit={(form) => handleUpdateActivity(editingItem.data.id, form)}
-          onDelete={() => handleDeleteActivity(editingItem.data.id)}
+          initialValues={{
+            ...editingItem.data,
+            responsavel: editingItem.data.split_type === 'igual' ? editingItem.data.paid_by : 'individual',
+          }}
+          onSubmit={(form) => handleUpdateActivity(editingItem.data, form)}
+          onDelete={() => handleDeleteActivity(editingItem.data)}
           fields={[
             { name: 'activity_name', label: 'Nome do passeio', required: true },
             { name: 'assigned_date', label: 'Data', type: 'date' },
             { name: 'shift', label: 'Turno', type: 'select', options: ['Manhã', 'Tarde', 'Noite'] },
             { name: 'exact_time', label: 'Horário exato', type: 'time' },
-            { name: 'cost_per_person_eur', label: 'Custo por pessoa (EUR)', type: 'number' },
+            { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number' },
             {
-              name: 'paid_by',
-              label: 'Lançar gasto agora: pago por (opcional)',
+              name: 'responsavel',
+              label: 'Responsável pelo Pagamento',
               type: 'select',
-              options: travelers.map((t) => t.name),
-            },
-            {
-              name: 'split_type',
-              label: 'Tipo de divisão do gasto',
-              type: 'select',
-              options: splitTypeOptions,
+              options: responsavelOptions,
               default: 'individual',
             },
             {
@@ -1974,9 +2056,12 @@ function Dashboard({ session }) {
           title="Editar transporte"
           icon={Plane}
           onClose={() => setEditingItem(null)}
-          initialValues={editingItem.data}
-          onSubmit={(form) => handleUpdateTransport(editingItem.data.id, form)}
-          onDelete={() => handleDeleteTransport(editingItem.data.id)}
+          initialValues={{
+            ...editingItem.data,
+            responsavel: editingItem.data.split_type === 'igual' ? editingItem.data.paid_by : 'individual',
+          }}
+          onSubmit={(form) => handleUpdateTransport(editingItem.data, form)}
+          onDelete={() => handleDeleteTransport(editingItem.data)}
           fields={[
             { name: 'origin_city', label: 'Cidade de origem', required: true },
             { name: 'origin_station', label: 'Estação/aeroporto de saída (opcional)' },
@@ -1985,18 +2070,12 @@ function Dashboard({ session }) {
             { name: 'departure_date', label: 'Data de partida', type: 'date' },
             { name: 'departure_time', label: 'Hora de partida', type: 'time' },
             { name: 'arrival_time', label: 'Hora de chegada', type: 'time' },
-            { name: 'cost_per_person_eur', label: 'Custo por pessoa (EUR)', type: 'number' },
+            { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number' },
             {
-              name: 'paid_by',
-              label: 'Lançar gasto agora: pago por (opcional)',
+              name: 'responsavel',
+              label: 'Responsável pelo Pagamento',
               type: 'select',
-              options: travelers.map((t) => t.name),
-            },
-            {
-              name: 'split_type',
-              label: 'Tipo de divisão do gasto',
-              type: 'select',
-              options: splitTypeOptions,
+              options: responsavelOptions,
               default: 'individual',
             },
             {
@@ -2015,25 +2094,22 @@ function Dashboard({ session }) {
           title="Editar hospedagem"
           icon={Hotel}
           onClose={() => setEditingItem(null)}
-          initialValues={editingItem.data}
-          onSubmit={(form) => handleUpdateAccommodation(editingItem.data.id, form)}
-          onDelete={() => handleDeleteAccommodation(editingItem.data.id)}
+          initialValues={{
+            ...editingItem.data,
+            responsavel: editingItem.data.split_type === 'igual' ? editingItem.data.paid_by : 'individual',
+          }}
+          onSubmit={(form) => handleUpdateAccommodation(editingItem.data, form)}
+          onDelete={() => handleDeleteAccommodation(editingItem.data)}
           fields={[
             { name: 'hotel_name', label: 'Nome do hotel', required: true },
             { name: 'check_in', label: 'Check-in', type: 'date' },
             { name: 'check_out', label: 'Check-out', type: 'date' },
             { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number' },
             {
-              name: 'paid_by',
-              label: 'Lançar gasto agora: pago por (opcional)',
+              name: 'responsavel',
+              label: 'Responsável pelo Pagamento',
               type: 'select',
-              options: travelers.map((t) => t.name),
-            },
-            {
-              name: 'split_type',
-              label: 'Tipo de divisão do gasto',
-              type: 'select',
-              options: splitTypeOptions,
+              options: responsavelOptions,
               default: 'individual',
             },
             {
@@ -2061,16 +2137,10 @@ function Dashboard({ session }) {
             { name: 'category', label: 'Categoria', type: 'select', options: EXPENSE_CATEGORIES },
             { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number', required: true },
             {
-              name: 'paid_by',
-              label: 'Pago por (opcional — se vazio, vira compra individual sua)',
+              name: 'responsavel',
+              label: 'Responsável pelo Pagamento',
               type: 'select',
-              options: travelers.map((t) => t.name),
-            },
-            {
-              name: 'split_type',
-              label: 'Tipo de divisão',
-              type: 'select',
-              options: splitTypeOptions,
+              options: responsavelOptions,
               default: 'individual',
             },
           ]}

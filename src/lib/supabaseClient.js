@@ -17,5 +17,11 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     persistSession: true,
     autoRefreshToken: true,
     detectSessionInUrl: true,
+    // Explícito por causa do Safari no iPhone: em modo standalone (ícone
+    // adicionado à Tela de Início) e em navegação privada, o Safari é mais
+    // agressivo limpando storage. Apontar window.localStorage direto (em vez
+    // de deixar o supabase-js escolher sozinho) evita cair num storage em
+    // memória que se perde ao trocar de app ou fechar a aba.
+    storage: window.localStorage,
   },
 })
