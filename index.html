@@ -3,20 +3,12 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-    <meta name="theme-color" content="#ede6d6" />
+    <meta name="theme-color" content="#FDFBF7" />
 
-    <!-- Favicon: SVG primeiro (nítido em qualquer tamanho, navegadores modernos
-         de desktop), com fallback em .ico/.png pra quem não suporta SVG. -->
-    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-    <link rel="icon" type="image/png" href="/favicon.png" />
-    <link rel="alternate icon" href="/favicon.ico" />
+    <!-- Ícone da Tela de Início no iOS com PNG embutido via código (Resolve o erro 404 e é 100% compatível com Safari) -->
+    <link rel="apple-touch-icon" href="data:image/png;base64,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">
 
-    <!-- Ícone da Tela de Início no iOS. O Safari do iPhone EXIGE um PNG aqui —
-         SVG é ignorado nesse link específico e cai pra um print da tela. -->
-    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
-
-    <!-- Deixa a barra de status mais integrada quando o app é aberto a partir
-         do ícone salvo na Tela de Início (modo standalone). -->
+    <!-- Configurações PWA obrigatórias para modo standalone de tela cheia -->
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="Cartão Postal" />
