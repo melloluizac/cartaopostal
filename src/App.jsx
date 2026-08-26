@@ -22,6 +22,8 @@ import {
   ChevronDown,
   ChevronUp,
   ClipboardList,
+  Link2,
+  Copy,
 } from 'lucide-react'
 
 // -----------------------------------------------------------------------
@@ -547,6 +549,184 @@ function CityNotesItem({ cityName, notes, isOpen, onToggle, onSave }) {
 }
 
 
+// Gera um código de convite de 6 caracteres. Evita 0/O e 1/I de propósito,
+// pra reduzir confusão na hora de digitar/ler em voz alta.
+function generateInviteCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+  let code = ''
+  for (let i = 0; i < 6; i++) code += chars[Math.floor(Math.random() * chars.length)]
+  return code
+}
+
+// -----------------------------------------------------------------------
+// Onboarding — tela mostrada quando a conta logada ainda não é dona nem
+// participante de nenhuma viagem. Duas portas de entrada: criar uma viagem
+// nova (gera o código de convite) ou entrar com um código recebido.
+// -----------------------------------------------------------------------
+
+function Onboarding({ session, onTripReady }) {
+  const [mode, setMode] = useState(null) // null | 'create' | 'join'
+  const [joinCode, setJoinCode] = useState('')
+  const [joinError, setJoinError] = useState(null)
+  const [joining, setJoining] = useState(false)
+
+  async function handleCreateTrip(form) {
+    let lastError = null
+    // Tenta algumas vezes: se o código sortido colidir com um já existente
+    // (UNIQUE), sorteia outro. Qualquer outro tipo de erro para na hora.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const { error } = await supabase.from('trips').insert({
+        user_id: session.user.id,
+        title: form.title,
+        start_date: form.start_date || null,
+        end_date: form.end_date || null,
+        currency: form.currency || 'EUR',
+        base_euro_rate: form.base_euro_rate ? Number(form.base_euro_rate) : null,
+        invite_code: generateInviteCode(),
+      })
+      if (!error) {
+        await onTripReady()
+        return
+      }
+      lastError = error
+      if (error.code !== '23505') break
+    }
+    throw lastError
+  }
+
+  async function handleJoin() {
+    const code = joinCode.trim().toUpperCase()
+    if (code.length !== 6) {
+      setJoinError('O código tem 6 caracteres.')
+      return
+    }
+    setJoining(true)
+    setJoinError(null)
+
+    const { data, error } = await supabase.rpc('find_trip_by_invite_code', { code })
+    if (error || !data || data.length === 0) {
+      setJoinError('Código não encontrado. Confira com quem te enviou.')
+      setJoining(false)
+      return
+    }
+
+    const { error: insertError } = await supabase
+      .from('trip_participants')
+      .insert({ trip_id: data[0].id, user_id: session.user.id })
+    setJoining(false)
+
+    // 23505 = unique_violation — já era participante, trata como sucesso.
+    if (insertError && insertError.code !== '23505') {
+      setJoinError(insertError.message)
+      return
+    }
+
+    await onTripReady()
+  }
+
+  return (
+    <div className="flex min-h-screen flex-col items-center justify-center gap-8 bg-background px-6 text-center">
+      <div>
+        <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-primary/10 text-primary">
+          <Stamp className="h-6 w-6" aria-hidden="true" />
+        </div>
+        <h1 className="font-display text-3xl font-semibold text-foreground">Cartão Postal</h1>
+        <p className="mt-1 font-mono text-xs uppercase tracking-wide text-muted-foreground">
+          Nenhuma viagem vinculada à sua conta ainda
+        </p>
+      </div>
+
+      {mode === null && (
+        <div className="flex w-full max-w-sm flex-col gap-3">
+          <button
+            onClick={() => setMode('create')}
+            className="flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-3 font-mono text-sm font-medium text-primary-foreground"
+          >
+            <Plus className="h-4 w-4" aria-hidden="true" />
+            Criar Nova Viagem
+          </button>
+          <button
+            onClick={() => setMode('join')}
+            className="flex items-center justify-center gap-2 rounded-lg border border-border bg-card px-4 py-3 font-mono text-sm font-medium text-foreground"
+          >
+            <Link2 className="h-4 w-4" aria-hidden="true" />
+            Entrar com Código
+          </button>
+        </div>
+      )}
+
+      {mode === 'join' && (
+        <div className="flex w-full max-w-sm flex-col gap-3">
+          <label className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
+            Código de convite
+          </label>
+          <input
+            type="text"
+            value={joinCode}
+            onChange={(e) => setJoinCode(e.target.value.toUpperCase().slice(0, 6))}
+            maxLength={6}
+            placeholder="EUR26X"
+            className="rounded-lg border border-input bg-card px-3 py-3 text-center font-mono text-2xl tracking-[0.3em] text-foreground outline-none ring-primary/40 focus:ring-2"
+          />
+          {joinError && (
+            <p className="rounded-lg border border-rosewood/40 bg-rosewood/10 px-3 py-2 font-mono text-xs text-rosewood">
+              {joinError}
+            </p>
+          )}
+          <button
+            onClick={handleJoin}
+            disabled={joining || joinCode.length !== 6}
+            className="flex items-center justify-center gap-2 rounded-lg bg-primary px-4 py-3 font-mono text-sm font-medium text-primary-foreground disabled:opacity-60"
+          >
+            {joining && <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />}
+            Sincronizar
+          </button>
+          <button
+            onClick={() => {
+              setMode(null)
+              setJoinError(null)
+              setJoinCode('')
+            }}
+            className="font-mono text-xs uppercase tracking-wide text-muted-foreground underline"
+          >
+            Voltar
+          </button>
+        </div>
+      )}
+
+      {mode === 'create' && (
+        <QuickAddSheet
+          title="Criar Nova Viagem"
+          icon={Stamp}
+          onClose={() => setMode(null)}
+          onSubmit={handleCreateTrip}
+          fields={[
+            { name: 'title', label: 'Título da viagem', required: true },
+            { name: 'start_date', label: 'Data de início', type: 'date' },
+            { name: 'end_date', label: 'Data de término', type: 'date' },
+            {
+              name: 'currency',
+              label: 'Moeda',
+              type: 'select',
+              options: ['EUR', 'USD', 'BRL', 'GBP', 'CHF'],
+              default: 'EUR',
+            },
+            { name: 'base_euro_rate', label: 'Cotação base da moeda (opcional)', type: 'number' },
+          ]}
+        />
+      )}
+
+      <button
+        onClick={() => supabase.auth.signOut()}
+        className="font-mono text-xs uppercase tracking-wide text-muted-foreground underline underline-offset-2"
+      >
+        Sair
+      </button>
+    </div>
+  )
+}
+
+
 function Dashboard({ session }) {
   const [view, setView] = useState('home') // 'home' | 'roteiro' | 'gastos'
   const [trip, setTrip] = useState(null)
@@ -579,59 +759,84 @@ function Dashboard({ session }) {
   const [newReminderText, setNewReminderText] = useState('')
   const [expandedCityNotes, setExpandedCityNotes] = useState(() => new Set())
   const [cityNotes, setCityNotes] = useState([]) // linhas de city_notes (1 por destino, criada sob demanda)
+  const [codeCopied, setCodeCopied] = useState(false)
 
-  // Carrega a viagem do usuário logado + destinos + viajantes + alertas
-  useEffect(() => {
-    let ignore = false
-    async function loadTrip() {
-      setLoading(true)
-      setErrorMsg(null)
+  async function handleCopyInviteCode() {
+    if (!trip?.invite_code) return
+    try {
+      await navigator.clipboard.writeText(trip.invite_code)
+      setCodeCopied(true)
+      setTimeout(() => setCodeCopied(false), 2000)
+    } catch {
+      // clipboard indisponível (ex: contexto não-seguro) — ignora silenciosamente
+    }
+  }
 
-      const { data: trips, error: tripError } = await supabase
-        .from('trips')
-        .select('*')
+  // Carrega a viagem do usuário logado (como dona OU como participante via
+  // trip_participants) + destinos + viajantes + alertas.
+  const loadTrip = useCallback(async () => {
+    setLoading(true)
+    setErrorMsg(null)
+
+    // 1. É dona de alguma viagem?
+    const { data: ownedTrips, error: ownedError } = await supabase
+      .from('trips')
+      .select('*')
+      .eq('user_id', session.user.id)
+      .limit(1)
+
+    if (ownedError) {
+      setErrorMsg(ownedError.message)
+      setLoading(false)
+      return
+    }
+
+    let currentTrip = ownedTrips?.[0] ?? null
+
+    // 2. Se não é dona, é participante de alguma via convite?
+    if (!currentTrip) {
+      const { data: participantRows } = await supabase
+        .from('trip_participants')
+        .select('trip_id')
         .eq('user_id', session.user.id)
         .limit(1)
 
-      if (tripError) {
-        if (!ignore) setErrorMsg(tripError.message)
-        setLoading(false)
-        return
-      }
-
-      const currentTrip = trips?.[0] ?? null
-      if (!currentTrip) {
-        if (!ignore) {
-          setTrip(null)
-          setLoading(false)
-        }
-        return
-      }
-      if (ignore) return
-      setTrip(currentTrip)
-
-      const [destRes, travelersRes, alertRes] = await Promise.all([
-        supabase
-          .from('destinations')
+      if (participantRows?.[0]) {
+        const { data: participantTrips } = await supabase
+          .from('trips')
           .select('*')
-          .eq('trip_id', currentTrip.id)
-          .order('order_index', { ascending: true }),
-        supabase.from('trip_travelers').select('*').eq('trip_id', currentTrip.id),
-        supabase.from('view_hotel_cancellation_alerts').select('*').eq('trip_id', currentTrip.id),
-      ])
-
-      if (!ignore) {
-        if (destRes.data) setDestinations(destRes.data)
-        setTravelers(travelersRes.data ?? [])
-        setAlertRows(alertRes.data ?? [])
-        setLoading(false)
+          .eq('id', participantRows[0].trip_id)
+          .limit(1)
+        currentTrip = participantTrips?.[0] ?? null
       }
     }
-    loadTrip()
-    return () => {
-      ignore = true
+
+    if (!currentTrip) {
+      setTrip(null)
+      setLoading(false)
+      return
     }
+    setTrip(currentTrip)
+
+    const [destRes, travelersRes, alertRes] = await Promise.all([
+      supabase
+        .from('destinations')
+        .select('*')
+        .eq('trip_id', currentTrip.id)
+        .order('order_index', { ascending: true }),
+      supabase.from('trip_travelers').select('*').eq('trip_id', currentTrip.id),
+      supabase.from('view_hotel_cancellation_alerts').select('*').eq('trip_id', currentTrip.id),
+    ])
+
+    if (destRes.data) setDestinations(destRes.data)
+    setTravelers(travelersRes.data ?? [])
+    setAlertRows(alertRes.data ?? [])
+    setLoading(false)
   }, [session.user.id])
+
+  useEffect(() => {
+    loadTrip()
+  }, [loadTrip])
 
   // Viajante (linha de trip_travelers) vinculado à conta atualmente logada,
   // via trip_travelers.user_id. Usado como responsável padrão quando
@@ -664,11 +869,19 @@ function Dashboard({ session }) {
     }
   }
 
-  // Data de início da viagem, calculada como a menor data entre todas as
-  // hospedagens/passeios/transportes já cadastrados em qualquer cidade —
-  // a tabela trips não tem campo de data próprio.
+  // Data de início da viagem: usa trip.start_date se a pessoa cadastrou na
+  // criação da viagem; senão, calcula como a menor data entre todas as
+  // hospedagens/passeios/transportes já cadastrados em qualquer cidade.
   useEffect(() => {
-    if (!trip || destinations.length === 0) {
+    if (!trip) {
+      setTripStartDate(null)
+      return
+    }
+    if (trip.start_date) {
+      setTripStartDate(trip.start_date)
+      return
+    }
+    if (destinations.length === 0) {
       setTripStartDate(null)
       return
     }
@@ -996,6 +1209,27 @@ function Dashboard({ session }) {
   }
 
   // --- Handlers de insert -------------------------------------------------
+
+  async function handleAddDestination(form) {
+    const orderIndex = destinations.length
+      ? Math.max(...destinations.map((d) => d.order_index ?? 0)) + 1
+      : 0
+    const { data: inserted, error } = await supabase
+      .from('destinations')
+      .insert({
+        trip_id: trip.id,
+        city_name: form.city_name,
+        is_bate_volta: form.is_bate_volta === 'sim',
+        order_index: orderIndex,
+      })
+      .select('*')
+      .single()
+    if (error) throw error
+    setDestinations((prev) => [...prev, inserted])
+    // Já deixa a cidade recém-criada selecionada, pra poder começar a
+    // adicionar passeios/hospedagem nela na hora.
+    setActiveDestId(inserted.id)
+  }
 
   async function handleAddActivity(form) {
     // Na Visão geral não existe uma cidade implícita, então o formulário
@@ -1490,19 +1724,7 @@ function Dashboard({ session }) {
   }
 
   if (!trip) {
-    return (
-      <div className="flex min-h-screen flex-col items-center justify-center gap-3 bg-background px-6 text-center">
-        <p className="font-mono text-sm text-muted-foreground">
-          Nenhuma viagem encontrada para este usuário.
-        </p>
-        <button
-          onClick={() => supabase.auth.signOut()}
-          className="font-mono text-xs uppercase tracking-wide text-primary underline"
-        >
-          Sair
-        </button>
-      </div>
-    )
+    return <Onboarding session={session} onTripReady={loadTrip} />
   }
 
   const activeDest = destinations.find((d) => d.id === activeDestId)
@@ -1569,6 +1791,20 @@ function Dashboard({ session }) {
             <div>
               <p className="font-mono text-xs uppercase tracking-wide text-muted-foreground">Cartão Postal</p>
               <h1 className="font-display text-4xl font-semibold text-foreground sm:text-5xl">{trip.title}</h1>
+              {trip.invite_code && (
+                <button
+                  onClick={handleCopyInviteCode}
+                  className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-border bg-card px-3 py-1 font-mono text-[11px] uppercase tracking-[0.2em] text-muted-foreground"
+                  title="Copiar código de convite"
+                >
+                  {codeCopied ? (
+                    <Check className="h-3 w-3 text-secondary-foreground" aria-hidden="true" />
+                  ) : (
+                    <Copy className="h-3 w-3" aria-hidden="true" />
+                  )}
+                  {trip.invite_code}
+                </button>
+              )}
             </div>
 
             <p className="font-display text-5xl font-semibold leading-tight text-primary sm:text-6xl">
@@ -1642,15 +1878,24 @@ function Dashboard({ session }) {
               <h2 id="roteiro-heading" className="flex items-center gap-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground">
                 <MapPin className="h-3.5 w-3.5" /> Roteiro
               </h2>
-              {activeDestId === 'ALL' && allTimelineDates.length > 0 && (
+              <div className="flex items-center gap-3">
                 <button
                   type="button"
-                  onClick={toggleExpandAll}
-                  className="font-mono text-[10px] uppercase tracking-wide text-primary underline underline-offset-2"
+                  onClick={() => setOpenSheet('destination')}
+                  className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground underline underline-offset-2"
                 >
-                  {allDaysExpanded ? 'Recolher tudo' : 'Expandir tudo'}
+                  + Cidade
                 </button>
-              )}
+                {activeDestId === 'ALL' && allTimelineDates.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={toggleExpandAll}
+                    className="font-mono text-[10px] uppercase tracking-wide text-primary underline underline-offset-2"
+                  >
+                    {allDaysExpanded ? 'Recolher tudo' : 'Expandir tudo'}
+                  </button>
+                )}
+              </div>
             </div>
 
             {/* 3 filtros lado a lado: Cidade / Status / Tipo */}
@@ -2184,6 +2429,28 @@ function Dashboard({ session }) {
       </div>
 
       {/* Sheets de criação */}
+      {openSheet === 'destination' && (
+        <QuickAddSheet
+          title="Nova cidade"
+          icon={MapPin}
+          onClose={() => setOpenSheet(null)}
+          onSubmit={handleAddDestination}
+          fields={[
+            { name: 'city_name', label: 'Nome da cidade', required: true },
+            {
+              name: 'is_bate_volta',
+              label: 'É bate-volta?',
+              type: 'select',
+              options: [
+                { value: 'nao', label: 'Não' },
+                { value: 'sim', label: 'Sim' },
+              ],
+              default: 'nao',
+            },
+          ]}
+        />
+      )}
+
       {openSheet === 'activity' && (
         <QuickAddSheet
           title={activeDestId === 'ALL' ? 'Novo passeio' : `Novo passeio em ${activeDest?.city_name ?? ''}`}
