@@ -760,6 +760,13 @@ function Dashboard({ session }) {
   const [expandedCityNotes, setExpandedCityNotes] = useState(() => new Set())
   const [cityNotes, setCityNotes] = useState([]) // linhas de city_notes (1 por destino, criada sob demanda)
   const [codeCopied, setCodeCopied] = useState(false)
+  const [cityNoteBannerOpen, setCityNoteBannerOpen] = useState(false)
+
+  // Recolhe o banner de anotações sempre que troca de cidade, pra não
+  // "vazar" a nota de uma cidade aberta sem querer pra outra.
+  useEffect(() => {
+    setCityNoteBannerOpen(false)
+  }, [activeDestId])
 
   async function handleCopyInviteCode() {
     if (!trip?.invite_code) return
@@ -1553,6 +1560,42 @@ function Dashboard({ session }) {
     [destinations]
   )
 
+  // Rótulo de uma cidade pro cabeçalho do dia. Se for bate-volta, procura a
+  // cidade "base" mais próxima antes dela na ordem do roteiro e monta
+  // "Base (Bate-volta: Cidade)" — ex: "Milão (Bate-volta: Como)".
+  function cityLabelForDest(dest) {
+    if (!dest) return ''
+    if (!dest.is_bate_volta) return dest.city_name
+    const idx = destinations.findIndex((d) => d.id === dest.id)
+    let base = dest.city_name
+    for (let i = idx - 1; i >= 0; i--) {
+      if (!destinations[i].is_bate_volta) {
+        base = destinations[i].city_name
+        break
+      }
+    }
+    return `${base} (Bate-volta: ${dest.city_name})`
+  }
+
+  // Rótulo geo-contextual de um dia inteiro da timeline: se tiver um
+  // transporte entre cidades naquele dia, mostra "Origem ➔ Destino" (dia de
+  // deslocamento); senão mostra a cidade (com sufixo de bate-volta se for
+  // o caso).
+  function dayContextLabel(items) {
+    const transportItem = items.find((i) => i.kind === 'transport')
+    if (transportItem) {
+      return `${transportItem.data.origin_city} ➔ ${transportItem.data.destination_city}`
+    }
+    if (activeDestId !== 'ALL') {
+      return activeDest ? cityLabelForDest(activeDest) : ''
+    }
+    const withDest = items.find((i) => i.data.destination_id)
+    if (withDest) {
+      return cityLabelForDest(destinations.find((d) => d.id === withDest.data.destination_id))
+    }
+    return ''
+  }
+
   // Custo por pessoa exibido na timeline: se o item é "Individual", o valor
   // por pessoa é o próprio total (só a pessoa paga, por ela mesma). Se é
   // "igual" (um viajante específico foi escolhido como responsável), divide
@@ -1562,6 +1605,29 @@ function Dashboard({ session }) {
     const total = Number(row.total_cost_eur)
     return row.split_type === 'igual' ? total / Math.max(travelers.length, 1) : total
   }
+
+  // Todo valor no banco é guardado em EUR. Isso converte pra moeda de
+  // exibição escolhida na criação da viagem, usando a cotação base
+  // cadastrada. Se a moeda for EUR (ou não houver cotação definida), mostra
+  // em EUR sem converter nada.
+  const formatMoney = useCallback(
+    (amountEur) => {
+      const amount = Number(amountEur ?? 0)
+      const currency = trip?.currency || 'EUR'
+      const rate = Number(trip?.base_euro_rate)
+      if (currency === 'EUR' || !rate) {
+        return formatEUR(amount)
+      }
+      try {
+        return new Intl.NumberFormat('pt-BR', { style: 'currency', currency }).format(amount * rate)
+      } catch {
+        // código de moeda inválido pro Intl (não deveria acontecer, já que
+        // vem de uma lista fixa) — cai pro EUR sem converter.
+        return formatEUR(amount)
+      }
+    },
+    [trip?.currency, trip?.base_euro_rate]
+  )
 
   const filteredAccommodations = useMemo(() => {
     let list = accommodations
@@ -1732,7 +1798,7 @@ function Dashboard({ session }) {
   return (
     <div className="min-h-screen bg-background pb-24">
       {/* Header comum às 3 telas */}
-      <header className="sticky top-0 z-10 border-b border-border bg-card/95 px-4 py-3 backdrop-blur">
+      <header className="sticky top-0 z-10 border-b border-border bg-card/95 px-6 py-3 backdrop-blur sm:px-8">
         <div className="mx-auto flex max-w-2xl items-center justify-between">
           <p className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">Cartão Postal</p>
           <button
@@ -1942,6 +2008,31 @@ function Dashboard({ session }) {
               </select>
             </div>
 
+            {activeDestId !== 'ALL' && cityNoteByDestId[activeDestId]?.notes_content && (
+              <div className="mt-3 overflow-hidden rounded-lg border border-border bg-card">
+                <button
+                  type="button"
+                  onClick={() => setCityNoteBannerOpen((v) => !v)}
+                  className="flex w-full items-center justify-between px-3 py-2 font-mono text-[11px] text-muted-foreground"
+                >
+                  <span className="flex items-center gap-1.5">
+                    <ClipboardList className="h-3 w-3 shrink-0" aria-hidden="true" />
+                    Anotações de {activeDest?.city_name}
+                  </span>
+                  {cityNoteBannerOpen ? (
+                    <ChevronUp className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  ) : (
+                    <ChevronDown className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+                  )}
+                </button>
+                {cityNoteBannerOpen && (
+                  <p className="whitespace-pre-wrap border-t border-border px-3 py-2 font-mono text-[11px] text-muted-foreground">
+                    {cityNoteByDestId[activeDestId].notes_content}
+                  </p>
+                )}
+              </div>
+            )}
+
             {/* Timeline cronológica (hospedagem + passeios + transporte) */}
             <div className="mt-4 flex flex-col gap-4">
               {timelineByDay.length === 0 && (
@@ -1953,25 +2044,29 @@ function Dashboard({ session }) {
               {timelineByDay.map(({ date, items }) => {
                 const isAccordion = activeDestId === 'ALL'
                 const isExpanded = !isAccordion || expandedDays.has(date)
+                const contextLabel = dayContextLabel(items)
                 return (
                   <div key={date}>
                     <button
                       type="button"
                       onClick={() => isAccordion && toggleDay(date)}
-                      className={`mb-1.5 flex w-full items-center justify-between font-mono text-[11px] uppercase tracking-wide text-muted-foreground ${
+                      className={`mb-1.5 flex w-full items-center justify-between font-mono text-[11px] uppercase tracking-wide ${
                         isAccordion ? 'cursor-pointer' : 'cursor-default'
                       }`}
                     >
-                      <span>
-                        {date === 'Sem data' ? date : formatDate(date)} · {items.length}{' '}
-                        {items.length === 1 ? 'item' : 'itens'}
+                      <span className="text-foreground">
+                        {date === 'Sem data' ? date : formatDate(date)}
+                        {contextLabel && ` · ${contextLabel}`}
                       </span>
-                      {isAccordion &&
-                        (isExpanded ? (
-                          <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
-                        ) : (
-                          <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
-                        ))}
+                      <span className="flex shrink-0 items-center gap-1 pl-2 text-muted-foreground">
+                        {items.length} {items.length === 1 ? 'item' : 'itens'}
+                        {isAccordion &&
+                          (isExpanded ? (
+                            <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                          ) : (
+                            <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                          ))}
+                      </span>
                     </button>
 
                     {isExpanded && (
@@ -2076,7 +2171,7 @@ function Dashboard({ session }) {
                                       : item.time ?? '—'}
                                     {item.kind === 'activity' && item.data.shift ? ` · ${item.data.shift}` : ''}
                                     {item.data.total_cost_eur != null &&
-                                      ` · ${formatEUR(perPersonCost(item.data))}/pessoa`}
+                                      ` · ${formatMoney(perPersonCost(item.data))}/pessoa`}
                                   </p>
                                   {item.kind === 'transport' &&
                                     (item.data.origin_station || item.data.destination_station) && (
@@ -2157,10 +2252,10 @@ function Dashboard({ session }) {
                   return (
                     <div key={b.name} className="rounded-xl border border-border bg-card p-3">
                       <p className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">{b.name}</p>
-                      <p className="font-display text-xl font-semibold text-foreground">{formatEUR(b.totalPaid)}</p>
+                      <p className="font-display text-xl font-semibold text-foreground">{formatMoney(b.totalPaid)}</p>
                       <p className={`font-mono text-[11px] ${isPositive ? 'text-secondary-foreground' : 'text-accent'}`}>
                         {isPositive ? 'a receber ' : 'a pagar '}
-                        {formatEUR(Math.abs(b.balance))}
+                        {formatMoney(Math.abs(b.balance))}
                       </p>
                     </div>
                   )
@@ -2175,7 +2270,7 @@ function Dashboard({ session }) {
               <h2 id="total-heading" className="mb-2 font-mono text-xs uppercase tracking-wide text-muted-foreground">
                 Total da viagem
               </h2>
-              <p className="font-display text-4xl font-semibold text-foreground">{formatEUR(grandTotal)}</p>
+              <p className="font-display text-4xl font-semibold text-foreground">{formatMoney(grandTotal)}</p>
               <p className="mt-1 font-mono text-[10px] text-muted-foreground">
                 Soma dos gastos já lançados no extrato abaixo.
               </p>
@@ -2189,7 +2284,7 @@ function Dashboard({ session }) {
                 Estimativa do roteiro
               </h2>
               <p className="font-display text-3xl font-semibold text-foreground">
-                {formatEUR(roteiroEstimateTotal)}
+                {formatMoney(roteiroEstimateTotal)}
               </p>
               <p className="mt-1 font-mono text-[10px] text-muted-foreground">
                 Soma dos custos de passeios, transportes e hospedagens cadastrados, por status — independente de já
@@ -2232,10 +2327,10 @@ function Dashboard({ session }) {
               )}
               <div className="flex flex-col gap-2.5">
                 {categoryTotals.map(([cat, amount]) => (
-                  <div key={cat} title={formatEUR(amount)}>
+                  <div key={cat} title={formatMoney(amount)}>
                     <div className="mb-1 flex items-center justify-between font-mono text-[11px] text-foreground">
                       <span>{cat}</span>
-                      <span className="text-muted-foreground">{formatEUR(amount)}</span>
+                      <span className="text-muted-foreground">{formatMoney(amount)}</span>
                     </div>
                     <div className="h-2 overflow-hidden rounded-full bg-muted">
                       <div
@@ -2269,7 +2364,7 @@ function Dashboard({ session }) {
                             {e.category ?? 'Sem categoria'} · {formatDate(e.transaction_date)} · {e.paid_by}
                           </p>
                         </div>
-                        <p className="font-mono text-sm font-semibold text-foreground">{formatEUR(e.total_cost_eur)}</p>
+                        <p className="font-mono text-sm font-semibold text-foreground">{formatMoney(e.total_cost_eur)}</p>
                       </div>
                       <span className="mt-1.5 inline-flex items-center rounded-full border border-border bg-background px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
                         {splitLabel}
@@ -2381,7 +2476,7 @@ function Dashboard({ session }) {
           Hospedagem só aparecem na tela Roteiro; Gasto aparece nas 3 telas,
           mas fica reduzido (só o ícone "+") quando está na tela Roteiro, já
           que ali ele divide espaço com os outros três botões. */}
-      <div className="fixed bottom-0 left-0 right-0 z-10 border-t border-border bg-card/95 px-4 py-3 backdrop-blur">
+      <div className="fixed bottom-0 left-0 right-0 z-10 border-t border-border bg-card/95 px-6 py-3 backdrop-blur sm:px-8">
         <div className="mx-auto flex max-w-2xl gap-2">
           {view === 'roteiro' && (
             <>
