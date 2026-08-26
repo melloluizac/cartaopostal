@@ -21,6 +21,7 @@ import {
   Hotel,
   ChevronDown,
   ChevronUp,
+  ClipboardList,
 } from 'lucide-react'
 
 // -----------------------------------------------------------------------
@@ -494,6 +495,58 @@ function QuickAddSheet({ title, icon: Icon, fields, initialValues, onSubmit, onD
 // Dashboard (3 telas: Início, Roteiro, Gastos)
 // -----------------------------------------------------------------------
 
+// -----------------------------------------------------------------------
+// Item de accordion de "Anotações por cidade" — salva sozinho quando o
+// campo perde o foco (sem precisar de um botão "Salvar" separado).
+// -----------------------------------------------------------------------
+
+function CityNotesItem({ cityName, notes, isOpen, onToggle, onSave }) {
+  const [text, setText] = useState(notes ?? '')
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    setText(notes ?? '')
+  }, [notes])
+
+  async function handleBlur() {
+    if (text === (notes ?? '')) return
+    setSaving(true)
+    await onSave(text)
+    setSaving(false)
+  }
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-border bg-card">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center justify-between px-3 py-2.5 font-mono text-xs uppercase tracking-wide text-foreground"
+      >
+        {cityName}
+        {isOpen ? (
+          <ChevronUp className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+        ) : (
+          <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+        )}
+      </button>
+      {isOpen && (
+        <div className="border-t border-border p-3">
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            onBlur={handleBlur}
+            rows={4}
+            placeholder="Ex: comprar bilhete de metrô de 24h na estação..."
+            className="w-full rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
+          />
+          {saving && <p className="mt-1 font-mono text-[10px] text-muted-foreground">Salvando…</p>}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 function Dashboard({ session }) {
   const [view, setView] = useState('home') // 'home' | 'roteiro' | 'gastos'
   const [trip, setTrip] = useState(null)
@@ -521,6 +574,11 @@ function Dashboard({ session }) {
   const [openSheet, setOpenSheet] = useState(null) // 'activity' | 'transport' | 'expense' | null
   const [editingItem, setEditingItem] = useState(null) // { kind: 'activity' | 'transport', data: {...} } | null
   const [errorMsg, setErrorMsg] = useState(null)
+  // Aba "Detalhes"
+  const [reminders, setReminders] = useState([])
+  const [newReminderText, setNewReminderText] = useState('')
+  const [expandedCityNotes, setExpandedCityNotes] = useState(() => new Set())
+  const [cityNotes, setCityNotes] = useState([]) // linhas de city_notes (1 por destino, criada sob demanda)
 
   // Carrega a viagem do usuário logado + destinos + viajantes + alertas
   useEffect(() => {
@@ -771,6 +829,112 @@ function Dashboard({ session }) {
   useEffect(() => {
     refreshFinancials()
   }, [refreshFinancials])
+
+  // --- Aba "Detalhes": lembretes globais + notas por cidade --------------
+
+  const loadReminders = useCallback(async () => {
+    if (!trip) {
+      setReminders([])
+      return
+    }
+    const { data } = await supabase
+      .from('trip_reminders')
+      .select('*')
+      .eq('trip_id', trip.id)
+      .order('created_at', { ascending: true })
+    setReminders(data ?? [])
+  }, [trip])
+
+  useEffect(() => {
+    loadReminders()
+  }, [loadReminders])
+
+  async function handleAddReminder() {
+    const text = newReminderText.trim()
+    if (!text || !trip) return
+    const { error } = await supabase.from('trip_reminders').insert({ trip_id: trip.id, task_text: text, is_completed: false })
+    if (error) {
+      setErrorMsg(error.message)
+      return
+    }
+    setNewReminderText('')
+    await loadReminders()
+  }
+
+  async function handleToggleReminder(reminder) {
+    const { error } = await supabase
+      .from('trip_reminders')
+      .update({ is_completed: !reminder.is_completed })
+      .eq('id', reminder.id)
+    if (error) {
+      setErrorMsg(error.message)
+      return
+    }
+    await loadReminders()
+  }
+
+  async function handleDeleteReminder(id) {
+    const { error } = await supabase.from('trip_reminders').delete().eq('id', id)
+    if (error) {
+      setErrorMsg(error.message)
+      return
+    }
+    await loadReminders()
+  }
+
+  function toggleCityNotes(destId) {
+    setExpandedCityNotes((prev) => {
+      const next = new Set(prev)
+      if (next.has(destId)) next.delete(destId)
+      else next.add(destId)
+      return next
+    })
+  }
+
+  // Busca as notas de todas as cidades da viagem de uma vez (a tabela
+  // city_notes tem no máximo 1 linha por destino, criada só quando a pessoa
+  // salva algo pela primeira vez naquela cidade).
+  const loadCityNotes = useCallback(async () => {
+    if (destinations.length === 0) {
+      setCityNotes([])
+      return
+    }
+    const destIds = destinations.map((d) => d.id)
+    const { data } = await supabase.from('city_notes').select('*').in('destination_id', destIds)
+    setCityNotes(data ?? [])
+  }, [destinations])
+
+  useEffect(() => {
+    loadCityNotes()
+  }, [loadCityNotes])
+
+  const cityNoteByDestId = useMemo(
+    () => Object.fromEntries(cityNotes.map((n) => [n.destination_id, n])),
+    [cityNotes]
+  )
+
+  async function handleSaveCityNotes(destId, text) {
+    const existing = cityNoteByDestId[destId]
+    if (existing) {
+      const { error } = await supabase
+        .from('city_notes')
+        .update({ notes_content: text, updated_at: new Date().toISOString() })
+        .eq('id', existing.id)
+      if (error) {
+        setErrorMsg(error.message)
+        return
+      }
+    } else {
+      const { error } = await supabase
+        .from('city_notes')
+        .insert({ destination_id: destId, notes_content: text })
+      if (error) {
+        setErrorMsg(error.message)
+        return
+      }
+    }
+    await loadCityNotes()
+  }
 
   // Cria OU atualiza o gasto vinculado a um item do roteiro (passeio,
   // transporte ou hospedagem). Se `existingExpenseId` já existir, faz
@@ -1358,24 +1522,37 @@ function Dashboard({ session }) {
           </button>
         </div>
 
-        {/* Navegação entre as 3 telas */}
-        <div className="mx-auto mt-2 grid max-w-2xl grid-cols-3 gap-1 rounded-lg border border-border bg-background p-1">
-          {[
-            { key: 'home', label: 'Início', icon: Home },
-            { key: 'roteiro', label: 'Roteiro', icon: MapPin },
-            { key: 'gastos', label: 'Gastos', icon: Wallet },
-          ].map(({ key, label, icon: NavIcon }) => (
-            <button
-              key={key}
-              onClick={() => setView(key)}
-              className={`flex items-center justify-center gap-1.5 rounded-md py-1.5 font-mono text-[11px] uppercase tracking-wide transition-colors ${
-                view === key ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'
-              }`}
-            >
-              <NavIcon className="h-3.5 w-3.5" aria-hidden="true" />
-              {label}
-            </button>
-          ))}
+        {/* Navegação entre as telas — "Início" fica compacto (só o ícone),
+            as outras 3 dividem o espaço restante igualmente. */}
+        <div className="mx-auto mt-2 flex max-w-2xl gap-1 rounded-lg border border-border bg-background p-1">
+          <button
+            onClick={() => setView('home')}
+            aria-label="Início"
+            title="Início"
+            className={`flex shrink-0 items-center justify-center rounded-md px-3 py-1.5 transition-colors ${
+              view === 'home' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'
+            }`}
+          >
+            <Home className="h-4 w-4" aria-hidden="true" />
+          </button>
+          <div className="grid flex-1 grid-cols-3 gap-1">
+            {[
+              { key: 'roteiro', label: 'Roteiro', icon: MapPin },
+              { key: 'gastos', label: 'Gastos', icon: Wallet },
+              { key: 'detalhes', label: 'Detalhes', icon: ClipboardList },
+            ].map(({ key, label, icon: NavIcon }) => (
+              <button
+                key={key}
+                onClick={() => setView(key)}
+                className={`flex items-center justify-center gap-1.5 rounded-md py-1.5 font-mono text-[11px] uppercase tracking-wide transition-colors ${
+                  view === key ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'
+                }`}
+              >
+                <NavIcon className="h-3.5 w-3.5" aria-hidden="true" />
+                {label}
+              </button>
+            ))}
+          </div>
         </div>
       </header>
 
@@ -1409,6 +1586,27 @@ function Dashboard({ session }) {
             >
               {pendingCount} {pendingCount === 1 ? 'pendência' : 'pendências'}
             </button>
+
+            {reminders.some((r) => !r.is_completed) && (
+              <div className="flex w-full flex-col gap-1.5 text-left">
+                <h2 className="font-mono text-xs uppercase tracking-wide text-muted-foreground">Lembretes</h2>
+                {reminders
+                  .filter((r) => !r.is_completed)
+                  .map((r) => (
+                    <button
+                      key={r.id}
+                      onClick={() => handleToggleReminder(r)}
+                      className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-left"
+                    >
+                      <span
+                        className="h-3.5 w-3.5 shrink-0 rounded-sm border border-primary/50"
+                        aria-hidden="true"
+                      />
+                      <span className="font-mono text-xs text-foreground">{r.task_text}</span>
+                    </button>
+                  ))}
+              </div>
+            )}
 
             {urgentAlerts.length > 0 && (
               <div className="flex w-full flex-col gap-2 text-left">
@@ -1834,6 +2032,100 @@ function Dashboard({ session }) {
                     </div>
                   )
                 })}
+              </div>
+            </section>
+          </div>
+        )}
+
+        {/* ================= TELA 4 — DETALHES ================= */}
+        {view === 'detalhes' && (
+          <div className="flex flex-col gap-6">
+            <section aria-labelledby="lembretes-heading">
+              <h2
+                id="lembretes-heading"
+                className="mb-2 flex items-center gap-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground"
+              >
+                <ClipboardList className="h-3.5 w-3.5" /> Lembretes
+              </h2>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newReminderText}
+                  onChange={(e) => setNewReminderText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') handleAddReminder()
+                  }}
+                  placeholder="Ex: Mudar o cartão no Booking"
+                  className="flex-1 rounded-lg border border-input bg-card px-3 py-2 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
+                />
+                <button
+                  onClick={handleAddReminder}
+                  aria-label="Adicionar lembrete"
+                  className="flex shrink-0 items-center justify-center rounded-lg bg-primary px-3 text-primary-foreground"
+                >
+                  <Plus className="h-4 w-4" aria-hidden="true" />
+                </button>
+              </div>
+
+              <div className="mt-3 flex flex-col gap-1.5">
+                {reminders.length === 0 && (
+                  <p className="rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
+                    Nenhum lembrete ainda.
+                  </p>
+                )}
+                {reminders.map((r) => (
+                  <div
+                    key={r.id}
+                    className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2.5"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={r.is_completed}
+                      onChange={() => handleToggleReminder(r)}
+                      className="h-4 w-4 shrink-0 accent-primary"
+                    />
+                    <span
+                      className={`flex-1 font-mono text-sm ${
+                        r.is_completed ? 'text-muted-foreground line-through' : 'text-foreground'
+                      }`}
+                    >
+                      {r.task_text}
+                    </span>
+                    <button
+                      onClick={() => handleDeleteReminder(r.id)}
+                      aria-label="Excluir lembrete"
+                      className="shrink-0 rounded-full p-1 text-muted-foreground hover:bg-muted"
+                    >
+                      <X className="h-3.5 w-3.5" aria-hidden="true" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            <section aria-labelledby="notas-heading">
+              <h2
+                id="notas-heading"
+                className="mb-2 flex items-center gap-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground"
+              >
+                <MapPin className="h-3.5 w-3.5" /> Anotações por cidade
+              </h2>
+              <div className="flex flex-col gap-2">
+                {destinations.length === 0 && (
+                  <p className="rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
+                    Cadastre uma cidade no Roteiro pra começar a anotar.
+                  </p>
+                )}
+                {destinations.map((d) => (
+                  <CityNotesItem
+                    key={d.id}
+                    cityName={d.city_name}
+                    notes={cityNoteByDestId[d.id]?.notes_content}
+                    isOpen={expandedCityNotes.has(d.id)}
+                    onToggle={() => toggleCityNotes(d.id)}
+                    onSave={(text) => handleSaveCityNotes(d.id, text)}
+                  />
+                ))}
               </div>
             </section>
           </div>
