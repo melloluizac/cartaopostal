@@ -54,6 +54,21 @@ const buildMapsSearchUrl = (query) => `https://www.google.com/maps/search/?api=1
 // hoje como padrão em vez de tentar gravar null (o que gerava erro 400).
 const todayIso = () => new Date().toISOString().slice(0, 10)
 
+// Lista de datas ISO (inclusive) entre duas datas — usada pra montar o
+// "esqueleto" da timeline com base na chegada/saída de uma cidade, mesmo
+// antes de qualquer passeio/transporte/hospedagem ser cadastrado nela.
+function generateDateRange(startIso, endIso) {
+  const dates = []
+  const current = new Date(`${startIso}T00:00:00`)
+  const end = new Date(`${endIso}T00:00:00`)
+  if (Number.isNaN(current.getTime()) || Number.isNaN(end.getTime()) || current > end) return dates
+  while (current <= end) {
+    dates.push(current.toISOString().slice(0, 10))
+    current.setDate(current.getDate() + 1)
+  }
+  return dates
+}
+
 // Dias até uma data (negativo = já passou)
 const daysUntil = (iso) => {
   if (!iso) return null
@@ -141,7 +156,10 @@ function StatusBadge({ status, onChange }) {
 function LoginScreen() {
   // 'signin' usa supabase.auth.signInWithPassword — 'signup' usa supabase.auth.signUp
   const [mode, setMode] = useState('signin')
-  const [email, setEmail] = useState('')
+  // Lembra só o e-mail (nunca a senha) num app raro de precisar logar de
+  // novo — assim, se o iOS limpar a sessão salva, a pessoa digita só a
+  // senha, não o e-mail inteiro de novo.
+  const [email, setEmail] = useState(() => localStorage.getItem('cartaoPostalLastEmail') ?? '')
   const [password, setPassword] = useState('')
   const [confirmPassword, setConfirmPassword] = useState('')
   const [loading, setLoading] = useState(false)
@@ -164,7 +182,11 @@ function LoginScreen() {
     setLoading(true)
     const { error } = await supabase.auth.signInWithPassword({ email, password })
     setLoading(false)
-    if (error) setError(error.message)
+    if (error) {
+      setError(error.message)
+      return
+    }
+    localStorage.setItem('cartaoPostalLastEmail', email)
   }
 
   async function handleSignUp(e) {
@@ -348,9 +370,24 @@ function QuickAddSheet({ title, icon: Icon, fields, initialValues, onSubmit, onD
   const [deleting, setDeleting] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [error, setError] = useState(null)
+  const [activeSuggestionField, setActiveSuggestionField] = useState(null)
 
   function setField(name, value) {
     setForm((prev) => ({ ...prev, [name]: value }))
+  }
+
+  // Ao clicar numa sugestão do autocomplete, preenche o próprio campo com o
+  // rótulo da sugestão e qualquer outro campo indicado em `fillValues` (ex:
+  // categoria e valor, no caso do "+ Gasto" puxando de um passeio já
+  // cadastrado). A pessoa ainda pode digitar por cima de qualquer campo
+  // preenchido assim.
+  function handleSelectSuggestion(fieldName, suggestion) {
+    setForm((prev) => ({
+      ...prev,
+      [fieldName]: suggestion.label,
+      ...(suggestion.fillValues ?? {}),
+    }))
+    setActiveSuggestionField(null)
   }
 
   async function handleSubmit(e) {
@@ -393,52 +430,88 @@ function QuickAddSheet({ title, icon: Icon, fields, initialValues, onSubmit, onD
         </div>
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-          {fields.map((f) => (
-            <div key={f.name} className="flex flex-col gap-1">
-              <label className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">
-                {f.label}
-                {f.required && ' *'}
-              </label>
-              {f.type === 'select' ? (
-                <select
-                  value={form[f.name]}
-                  required={f.required}
-                  onChange={(e) => setField(f.name, e.target.value)}
-                  className="rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
-                >
-                  <option value="" disabled>
-                    Selecione
-                  </option>
-                  {f.options.map((opt) => {
-                    const value = typeof opt === 'string' ? opt : opt.value
-                    const label = typeof opt === 'string' ? opt : opt.label
-                    return (
-                      <option key={value} value={value}>
-                        {label}
-                      </option>
-                    )
-                  })}
-                </select>
-              ) : f.type === 'textarea' ? (
-                <textarea
-                  value={form[f.name]}
-                  required={f.required}
-                  onChange={(e) => setField(f.name, e.target.value)}
-                  rows={2}
-                  className="rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
-                />
-              ) : (
-                <input
-                  type={f.type ?? 'text'}
-                  step={f.type === 'number' ? '0.01' : undefined}
-                  value={form[f.name]}
-                  required={f.required}
-                  onChange={(e) => setField(f.name, e.target.value)}
-                  className="rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
-                />
-              )}
-            </div>
-          ))}
+          {fields.map((f) => {
+            const matchingSuggestions =
+              f.suggestions && form[f.name]
+                ? f.suggestions
+                    .filter((s) => s.label.toLowerCase().includes(form[f.name].toLowerCase()))
+                    .slice(0, 6)
+                : []
+            return (
+              <div key={f.name} className="flex flex-col gap-1">
+                <label className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">
+                  {f.label}
+                  {f.required && ' *'}
+                </label>
+                {f.suggestions ? (
+                  <div className="relative">
+                    <input
+                      type="text"
+                      value={form[f.name]}
+                      required={f.required}
+                      autoComplete="off"
+                      onChange={(e) => setField(f.name, e.target.value)}
+                      onFocus={() => setActiveSuggestionField(f.name)}
+                      onBlur={() => setTimeout(() => setActiveSuggestionField(null), 150)}
+                      className="rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
+                    />
+                    {activeSuggestionField === f.name && matchingSuggestions.length > 0 && (
+                      <div className="absolute z-10 mt-1 w-full overflow-hidden rounded-lg border border-border bg-card shadow-lg">
+                        {matchingSuggestions.map((s) => (
+                          <button
+                            key={s.key}
+                            type="button"
+                            onMouseDown={(e) => e.preventDefault()}
+                            onClick={() => handleSelectSuggestion(f.name, s)}
+                            className="block w-full px-3 py-2 text-left font-mono text-xs text-foreground hover:bg-muted"
+                          >
+                            {s.label}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : f.type === 'select' ? (
+                  <select
+                    value={form[f.name]}
+                    required={f.required}
+                    onChange={(e) => setField(f.name, e.target.value)}
+                    className="rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
+                  >
+                    <option value="" disabled>
+                      Selecione
+                    </option>
+                    {f.options.map((opt) => {
+                      const value = typeof opt === 'string' ? opt : opt.value
+                      const label = typeof opt === 'string' ? opt : opt.label
+                      return (
+                        <option key={value} value={value}>
+                          {label}
+                        </option>
+                      )
+                    })}
+                  </select>
+                ) : f.type === 'textarea' ? (
+                  <textarea
+                    value={form[f.name]}
+                    required={f.required}
+                    onChange={(e) => setField(f.name, e.target.value)}
+                    rows={2}
+                    className="rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
+                  />
+                ) : (
+                  <input
+                    type={f.type ?? 'text'}
+                    step={f.type === 'number' ? '0.01' : undefined}
+                    value={form[f.name]}
+                    required={f.required}
+                    onChange={(e) => setField(f.name, e.target.value)}
+                    className="rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
+                  />
+                )}
+              </div>
+            )
+          })}
 
           {error && (
             <p className="rounded-lg border border-rosewood/40 bg-rosewood/10 px-3 py-2 font-mono text-xs text-rosewood">
@@ -1279,6 +1352,8 @@ function Dashboard({ session }) {
         city_name: form.city_name,
         is_bate_volta: form.is_bate_volta === 'sim',
         order_index: orderIndex,
+        arrival_date: form.arrival_date || null,
+        departure_date: form.departure_date || null,
       })
       .select('*')
       .single()
@@ -1452,6 +1527,7 @@ function Dashboard({ session }) {
     const { error } = await supabase
       .from('itinerary_activities')
       .update({
+        destination_id: form.destination_id,
         activity_name: form.activity_name,
         assigned_date: form.assigned_date || null,
         shift: form.shift || null,
@@ -1611,6 +1687,27 @@ function Dashboard({ session }) {
     [destinations]
   )
 
+  // Sugestões pro autocomplete de "Descrição" no formulário de Gasto —
+  // busca em TODOS os passeios já cadastrados na viagem (não só na cidade
+  // atual), pra evitar digitar/lançar a mesma coisa duas vezes.
+  const expenseSuggestions = useMemo(
+    () =>
+      overviewActivities
+        .filter((a) => a.activity_name)
+        .map((a) => {
+          const city = destById[a.destination_id]
+          return {
+            key: a.id,
+            label: city ? `${a.activity_name} (${city})` : a.activity_name,
+            fillValues: {
+              category: 'Passeio',
+              total_cost_eur: a.total_cost_eur != null ? String(a.total_cost_eur) : '',
+            },
+          }
+        }),
+    [overviewActivities, destById]
+  )
+
   // Rótulo de uma cidade pro cabeçalho do dia. Se for bate-volta, procura a
   // cidade "base" mais próxima antes dela na ordem do roteiro e monta
   // "Base (Bate-volta: Cidade)" — ex: "Milão (Bate-volta: Como)".
@@ -1723,13 +1820,28 @@ function Dashboard({ session }) {
       groups[key] = groups[key] ?? []
       groups[key].push({ kind: 'transport', time: t.departure_time, data: t })
     }
+
+    // Esqueleto: garante um dia (mesmo vazio) pra cada data entre chegada e
+    // saída da cidade, pra não deixar a timeline em branco logo depois de
+    // cadastrar uma cidade nova com essas datas preenchidas.
+    const destsToScaffold =
+      activeDestId === 'ALL' ? destinations : destinations.filter((d) => d.id === activeDestId)
+    for (const dest of destsToScaffold) {
+      if (!dest.arrival_date || !dest.departure_date) continue
+      for (const dateStr of generateDateRange(dest.arrival_date, dest.departure_date)) {
+        if (!groups[dateStr]) {
+          groups[dateStr] = [{ kind: 'placeholder', time: '00:00', data: { destination_id: dest.id } }]
+        }
+      }
+    }
+
     return Object.entries(groups)
       .sort(([a], [b]) => (a === 'Sem data' ? 1 : b === 'Sem data' ? -1 : a.localeCompare(b)))
       .map(([date, items]) => ({
         date,
         items: items.sort((a, b) => (a.time ?? '99:99').localeCompare(b.time ?? '99:99')),
       }))
-  }, [filteredAccommodations, filteredActivities, filteredTransport])
+  }, [filteredAccommodations, filteredActivities, filteredTransport, destinations, activeDestId])
 
   // Usado pelo botão "Expandir tudo" no topo da tela Roteiro (só relevante
   // no modo accordion, ou seja, na Visão geral).
@@ -2109,6 +2221,7 @@ function Dashboard({ session }) {
                 </p>
               )}
               {timelineByDay.map(({ date, items }) => {
+                const realItems = items.filter((i) => i.kind !== 'placeholder')
                 const isAccordion = activeDestId === 'ALL'
                 const isExpanded = !isAccordion || expandedDays.has(date)
                 const contextLabel = dayContextLabel(items)
@@ -2126,7 +2239,7 @@ function Dashboard({ session }) {
                         {contextLabel && ` · ${contextLabel}`}
                       </span>
                       <span className="flex shrink-0 items-center gap-1 pl-2 text-muted-foreground">
-                        {items.length} {items.length === 1 ? 'item' : 'itens'}
+                        {realItems.length} {realItems.length === 1 ? 'item' : 'itens'}
                         {isAccordion &&
                           (isExpanded ? (
                             <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
@@ -2138,7 +2251,12 @@ function Dashboard({ session }) {
 
                     {isExpanded && (
                       <div className="flex flex-col gap-2">
-                        {items.map((item, idx) => {
+                        {realItems.length === 0 && (
+                          <p className="rounded-xl border border-dashed border-border p-3 text-center font-mono text-[11px] text-muted-foreground">
+                            Nada planejado ainda pra este dia.
+                          </p>
+                        )}
+                        {realItems.map((item, idx) => {
                           const isAccommodation = item.kind === 'accommodation'
                           return (
                             <div
@@ -2609,6 +2727,8 @@ function Dashboard({ session }) {
               ],
               default: 'nao',
             },
+            { name: 'arrival_date', label: 'Data de chegada (opcional)', type: 'date' },
+            { name: 'departure_date', label: 'Data de saída (opcional)', type: 'date' },
           ]}
         />
       )}
@@ -2635,7 +2755,7 @@ function Dashboard({ session }) {
             { name: 'assigned_date', label: 'Data', type: 'date' },
             { name: 'shift', label: 'Turno', type: 'select', options: ['Manhã', 'Tarde', 'Noite'] },
             { name: 'exact_time', label: 'Horário exato', type: 'time' },
-            { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number' },
+            { name: 'total_cost_eur', label: 'Valor total', type: 'number' },
             {
               name: 'responsavel',
               label: 'Responsável pelo Pagamento',
@@ -2671,7 +2791,7 @@ function Dashboard({ session }) {
             { name: 'departure_date', label: 'Data de partida', type: 'date' },
             { name: 'departure_time', label: 'Hora de partida', type: 'time' },
             { name: 'arrival_time', label: 'Hora de chegada', type: 'time' },
-            { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number' },
+            { name: 'total_cost_eur', label: 'Valor total', type: 'number' },
             {
               name: 'responsavel',
               label: 'Responsável pelo Pagamento',
@@ -2712,7 +2832,7 @@ function Dashboard({ session }) {
             { name: 'hotel_name', label: 'Nome do hotel', required: true },
             { name: 'check_in', label: 'Check-in', type: 'date' },
             { name: 'check_out', label: 'Check-out', type: 'date' },
-            { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number' },
+            { name: 'total_cost_eur', label: 'Valor total', type: 'number' },
             {
               name: 'responsavel',
               label: 'Responsável pelo Pagamento',
@@ -2748,10 +2868,17 @@ function Dashboard({ session }) {
           onDelete={() => handleDeleteActivity(editingItem.data)}
           fields={[
             { name: 'activity_name', label: 'Nome do passeio', required: true },
+            {
+              name: 'destination_id',
+              label: 'Cidade',
+              type: 'select',
+              options: destinations.map((d) => ({ value: d.id, label: d.city_name })),
+              required: true,
+            },
             { name: 'assigned_date', label: 'Data', type: 'date' },
             { name: 'shift', label: 'Turno', type: 'select', options: ['Manhã', 'Tarde', 'Noite'] },
             { name: 'exact_time', label: 'Horário exato', type: 'time' },
-            { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number' },
+            { name: 'total_cost_eur', label: 'Valor total', type: 'number' },
             {
               name: 'responsavel',
               label: 'Responsável pelo Pagamento',
@@ -2791,7 +2918,7 @@ function Dashboard({ session }) {
             { name: 'departure_date', label: 'Data de partida', type: 'date' },
             { name: 'departure_time', label: 'Hora de partida', type: 'time' },
             { name: 'arrival_time', label: 'Hora de chegada', type: 'time' },
-            { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number' },
+            { name: 'total_cost_eur', label: 'Valor total', type: 'number' },
             {
               name: 'responsavel',
               label: 'Responsável pelo Pagamento',
@@ -2825,7 +2952,7 @@ function Dashboard({ session }) {
             { name: 'hotel_name', label: 'Nome do hotel', required: true },
             { name: 'check_in', label: 'Check-in', type: 'date' },
             { name: 'check_out', label: 'Check-out', type: 'date' },
-            { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number' },
+            { name: 'total_cost_eur', label: 'Valor total', type: 'number' },
             {
               name: 'responsavel',
               label: 'Responsável pelo Pagamento',
@@ -2853,10 +2980,10 @@ function Dashboard({ session }) {
           onClose={() => setOpenSheet(null)}
           onSubmit={handleAddExpense}
           fields={[
-            { name: 'description', label: 'Descrição', required: true },
-            { name: 'transaction_date', label: 'Data', type: 'date' },
+            { name: 'description', label: 'Descrição', required: true, suggestions: expenseSuggestions },
+            { name: 'transaction_date', label: 'Data', type: 'date', default: todayIso() },
             { name: 'category', label: 'Categoria', type: 'select', options: EXPENSE_CATEGORIES },
-            { name: 'total_cost_eur', label: 'Valor total (EUR)', type: 'number', required: true },
+            { name: 'total_cost_eur', label: 'Valor total', type: 'number' },
             {
               name: 'responsavel',
               label: 'Responsável pelo Pagamento',

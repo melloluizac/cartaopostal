@@ -29,7 +29,7 @@ export default {
         ring: '#37656e',
       },
       fontFamily: {
-        display: ['"Cormorant Garamond"', 'serif'],
+        display: ['"Playfair Display"', 'serif'],
         sans: ['"IBM Plex Mono"', 'monospace'],
         mono: ['"IBM Plex Mono"', 'monospace'],
       },
