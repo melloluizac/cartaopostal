@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
 import { supabase } from './lib/supabaseClient'
 import {
   Stamp,
@@ -24,6 +24,7 @@ import {
   ClipboardList,
   Link2,
   Copy,
+  ArrowRight,
 } from 'lucide-react'
 
 // -----------------------------------------------------------------------
@@ -360,6 +361,14 @@ function LoginScreen() {
 // mudam conforme os nomes dos viajantes).
 // -----------------------------------------------------------------------
 
+// Mapa de largura fracionária pra campos que dividem uma linha (ex: Cidade
+// 2/3 + Status 1/3, ou Valor Total 1/3 + Quem Pagou 2/3).
+const FIELD_WIDTH_CLASS = {
+  '1/3': 'w-1/3',
+  '2/3': 'w-2/3',
+  '1/2': 'w-1/2',
+}
+
 function QuickAddSheet({ title, icon: Icon, fields, initialValues, onSubmit, onDelete, onClose }) {
   const initial = useMemo(
     () => Object.fromEntries(fields.map((f) => [f.name, initialValues?.[f.name] ?? f.default ?? ''])),
@@ -416,6 +425,142 @@ function QuickAddSheet({ title, icon: Icon, fields, initialValues, onSubmit, onD
     }
   }
 
+  // Só os campos visíveis no momento (respeitando `hideWhen`), na ordem em
+  // que foram declarados.
+  const visibleFields = fields.filter((f) => !f.hideWhen || !f.hideWhen(form))
+
+  // Agrupa campos com o mesmo `row` numa única linha lado a lado; campos
+  // sem `row` ficam cada um na sua própria linha (comportamento padrão).
+  const rows = []
+  const rowIndexByKey = {}
+  for (const f of visibleFields) {
+    if (f.row) {
+      if (rowIndexByKey[f.row] === undefined) {
+        rowIndexByKey[f.row] = rows.length
+        rows.push({ key: f.row, fields: [f] })
+      } else {
+        rows[rowIndexByKey[f.row]].fields.push(f)
+      }
+    } else {
+      rows.push({ key: f.name, fields: [f] })
+    }
+  }
+
+  function renderField(f) {
+    const matchingSuggestions =
+      f.suggestions && form[f.name]
+        ? f.suggestions.filter((s) => s.label.toLowerCase().includes(form[f.name].toLowerCase())).slice(0, 6)
+        : []
+
+    return (
+      <div className="flex flex-col gap-1">
+        <label className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">
+          {f.label}
+          {f.required && ' *'}
+        </label>
+        {f.suggestions ? (
+          <div className="relative">
+            <input
+              type="text"
+              value={form[f.name]}
+              required={f.required}
+              autoComplete="off"
+              onChange={(e) => setField(f.name, e.target.value)}
+              onFocus={() => setActiveSuggestionField(f.name)}
+              onBlur={() => setTimeout(() => setActiveSuggestionField(null), 150)}
+              className="rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
+            />
+            {activeSuggestionField === f.name && matchingSuggestions.length > 0 && (
+              <div className="absolute z-10 mt-1 w-full overflow-hidden rounded-lg border border-border bg-card shadow-lg">
+                {matchingSuggestions.map((s) => (
+                  <button
+                    key={s.key}
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => handleSelectSuggestion(f.name, s)}
+                    className="block w-full px-3 py-2 text-left font-mono text-xs text-foreground hover:bg-muted"
+                  >
+                    {s.label}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : f.variant === 'status-pill' ? (
+          // Pílula de status: bem mais arredondada que os outros campos, e
+          // assume a cor do status selecionado — tanto fechada quanto nas
+          // opções da lista.
+          <select
+            value={form[f.name]}
+            required={f.required}
+            onChange={(e) => setField(f.name, e.target.value)}
+            style={
+              STATUS_OPTION_COLORS[form[f.name]]
+                ? {
+                    backgroundColor: STATUS_OPTION_COLORS[form[f.name]].bg,
+                    color: STATUS_OPTION_COLORS[form[f.name]].fg,
+                  }
+                : undefined
+            }
+            className="rounded-full border border-input bg-background px-3 py-2 text-center font-mono text-xs font-semibold uppercase tracking-wide text-foreground outline-none ring-primary/40 focus:ring-2"
+          >
+            {f.options.map((opt) => {
+              const value = typeof opt === 'string' ? opt : opt.value
+              const label = typeof opt === 'string' ? opt : opt.label
+              const colors = STATUS_OPTION_COLORS[value]
+              return (
+                <option
+                  key={value}
+                  value={value}
+                  style={colors ? { backgroundColor: colors.bg, color: colors.fg } : undefined}
+                >
+                  {label}
+                </option>
+              )
+            })}
+          </select>
+        ) : f.type === 'select' ? (
+          <select
+            value={form[f.name]}
+            required={f.required}
+            onChange={(e) => setField(f.name, e.target.value)}
+            className="rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
+          >
+            <option value="" disabled>
+              Selecione
+            </option>
+            {f.options.map((opt) => {
+              const value = typeof opt === 'string' ? opt : opt.value
+              const label = typeof opt === 'string' ? opt : opt.label
+              return (
+                <option key={value} value={value}>
+                  {label}
+                </option>
+              )
+            })}
+          </select>
+        ) : f.type === 'textarea' ? (
+          <textarea
+            value={form[f.name]}
+            required={f.required}
+            onChange={(e) => setField(f.name, e.target.value)}
+            rows={2}
+            className="rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
+          />
+        ) : (
+          <input
+            type={f.type ?? 'text'}
+            step={f.type === 'number' ? '0.01' : undefined}
+            value={form[f.name]}
+            required={f.required}
+            onChange={(e) => setField(f.name, e.target.value)}
+            className="rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
+          />
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center bg-foreground/30 backdrop-blur-sm sm:items-center">
       <div className="max-h-[85vh] w-full max-w-md overflow-y-auto rounded-t-2xl border border-border bg-card p-5 shadow-lg sm:rounded-2xl">
@@ -430,85 +575,28 @@ function QuickAddSheet({ title, icon: Icon, fields, initialValues, onSubmit, onD
         </div>
 
         <form onSubmit={handleSubmit} className="flex flex-col gap-3">
-          {fields.map((f) => {
-            const matchingSuggestions =
-              f.suggestions && form[f.name]
-                ? f.suggestions
-                    .filter((s) => s.label.toLowerCase().includes(form[f.name].toLowerCase()))
-                    .slice(0, 6)
-                : []
+          {rows.map((row) => {
+            if (row.fields.length === 1) {
+              const f = row.fields[0]
+              return <div key={row.key}>{renderField(f)}</div>
+            }
+            // Linha com mais de um campo lado a lado. A linha "cities" (só
+            // usada no formulário de Transporte) ganha uma seta entre os
+            // dois campos, indicando origem ➔ destino.
             return (
-              <div key={f.name} className="flex flex-col gap-1">
-                <label className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">
-                  {f.label}
-                  {f.required && ' *'}
-                </label>
-                {f.suggestions ? (
-                  <div className="relative">
-                    <input
-                      type="text"
-                      value={form[f.name]}
-                      required={f.required}
-                      autoComplete="off"
-                      onChange={(e) => setField(f.name, e.target.value)}
-                      onFocus={() => setActiveSuggestionField(f.name)}
-                      onBlur={() => setTimeout(() => setActiveSuggestionField(null), 150)}
-                      className="rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
-                    />
-                    {activeSuggestionField === f.name && matchingSuggestions.length > 0 && (
-                      <div className="absolute z-10 mt-1 w-full overflow-hidden rounded-lg border border-border bg-card shadow-lg">
-                        {matchingSuggestions.map((s) => (
-                          <button
-                            key={s.key}
-                            type="button"
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={() => handleSelectSuggestion(f.name, s)}
-                            className="block w-full px-3 py-2 text-left font-mono text-xs text-foreground hover:bg-muted"
-                          >
-                            {s.label}
-                          </button>
-                        ))}
+              <div key={row.key} className="flex items-start gap-2">
+                {row.fields.map((f, i) => (
+                  <Fragment key={f.name}>
+                    <div className={f.width ? FIELD_WIDTH_CLASS[f.width] : 'flex-1'}>
+                      {renderField(f)}
+                    </div>
+                    {row.key === 'cities' && i === 0 && (
+                      <div className="flex h-[38px] shrink-0 items-end pb-2 text-muted-foreground">
+                        <ArrowRight className="h-4 w-4" aria-hidden="true" />
                       </div>
                     )}
-                  </div>
-                ) : f.type === 'select' ? (
-                  <select
-                    value={form[f.name]}
-                    required={f.required}
-                    onChange={(e) => setField(f.name, e.target.value)}
-                    className="rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
-                  >
-                    <option value="" disabled>
-                      Selecione
-                    </option>
-                    {f.options.map((opt) => {
-                      const value = typeof opt === 'string' ? opt : opt.value
-                      const label = typeof opt === 'string' ? opt : opt.label
-                      return (
-                        <option key={value} value={value}>
-                          {label}
-                        </option>
-                      )
-                    })}
-                  </select>
-                ) : f.type === 'textarea' ? (
-                  <textarea
-                    value={form[f.name]}
-                    required={f.required}
-                    onChange={(e) => setField(f.name, e.target.value)}
-                    rows={2}
-                    className="rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
-                  />
-                ) : (
-                  <input
-                    type={f.type ?? 'text'}
-                    step={f.type === 'number' ? '0.01' : undefined}
-                    value={form[f.name]}
-                    required={f.required}
-                    onChange={(e) => setField(f.name, e.target.value)}
-                    className="rounded-lg border border-input bg-background px-3 py-2 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
-                  />
-                )}
+                  </Fragment>
+                ))}
               </div>
             )
           })}
@@ -1754,6 +1842,27 @@ function Dashboard({ session }) {
     return row.split_type === 'igual' ? total / Math.max(travelers.length, 1) : total
   }
 
+  // Monta o link "Como chegar" pro tipo certo de item — passeio/hospedagem
+  // buscam pelo nome + cidade; transporte busca pela estação/cidade de
+  // partida (é o que mais importa saber "como chegar" num item de viagem).
+  function mapsUrlFor(item) {
+    const cityContext =
+      activeDestId === 'ALL' ? destById[item.data.destination_id] ?? '' : activeDest?.city_name ?? ''
+    if (item.kind === 'activity') return buildMapsSearchUrl(`${item.data.activity_name} ${cityContext}`)
+    if (item.kind === 'transport') return buildMapsSearchUrl(item.data.origin_station || item.data.origin_city)
+    if (item.kind === 'accommodation') return buildMapsSearchUrl(`${item.data.hotel_name} ${cityContext}`)
+    return null
+  }
+
+  // Intervalo de datas pra hospedagem, sem nunca cair num travessão de
+  // campo vazio — se só uma ponta existir, mostra só ela.
+  function dateRangeLabel(checkIn, checkOut) {
+    if (checkIn && checkOut) return `${formatDate(checkIn)} → ${formatDate(checkOut)}`
+    if (checkIn) return formatDate(checkIn)
+    if (checkOut) return formatDate(checkOut)
+    return null
+  }
+
   // Todo valor no banco é guardado em EUR. Isso converte pra moeda de
   // exibição escolhida na criação da viagem, usando a cotação base
   // cadastrada. Se a moeda for EUR (ou não houver cotação definida), mostra
@@ -2005,6 +2114,53 @@ function Dashboard({ session }) {
             ))}
           </div>
         </div>
+
+        {/* Filtros da tela Roteiro — moram dentro do header sticky de propósito,
+            pra ficarem "grudados" bem abaixo dele ao rolar a página. */}
+        {view === 'roteiro' && (
+          <div className="mx-auto mt-2 grid max-w-2xl grid-cols-3 gap-2">
+            <select
+              value={activeDestId}
+              onChange={(e) => setActiveDestId(e.target.value)}
+              className="rounded-md border border-input bg-card px-2 py-1 font-mono text-[10px] text-foreground"
+            >
+              <option value="ALL">Cidades</option>
+              {destinations.map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.city_name}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={statusFilter}
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="rounded-md border border-input bg-card px-2 py-1 font-mono text-[10px] text-foreground"
+            >
+              <option value="all">Status</option>
+              {STATUS_ORDER.map((s) => (
+                <option
+                  key={s}
+                  value={s}
+                  style={{ backgroundColor: STATUS_OPTION_COLORS[s].bg, color: STATUS_OPTION_COLORS[s].fg }}
+                >
+                  {STATUS_CONFIG[s].label}
+                </option>
+              ))}
+            </select>
+
+            <select
+              value={categoryFilter}
+              onChange={(e) => setCategoryFilter(e.target.value)}
+              className="rounded-md border border-input bg-card px-2 py-1 font-mono text-[10px] text-foreground"
+            >
+              <option value="all">Categorias</option>
+              <option value="activity">Passeio</option>
+              <option value="transport">Transporte</option>
+              <option value="accommodation">Hospedagem</option>
+            </select>
+          </div>
+        )}
       </header>
 
       <main className="mx-auto flex max-w-2xl flex-col gap-6 px-4 pt-5">
@@ -2141,50 +2297,6 @@ function Dashboard({ session }) {
                   </button>
                 )}
               </div>
-            </div>
-
-            {/* 3 filtros lado a lado: Cidade / Status / Tipo */}
-            <div className="grid grid-cols-3 gap-2">
-              <select
-                value={activeDestId}
-                onChange={(e) => setActiveDestId(e.target.value)}
-                className="rounded-lg border border-input bg-card px-2 py-2 font-mono text-[11px] text-foreground"
-              >
-                <option value="ALL">Visão geral</option>
-                {destinations.map((d) => (
-                  <option key={d.id} value={d.id}>
-                    {d.city_name}
-                  </option>
-                ))}
-              </select>
-
-              <select
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-                className="rounded-lg border border-input bg-card px-2 py-2 font-mono text-[11px] text-foreground"
-              >
-                <option value="all">Todos os status</option>
-                {STATUS_ORDER.map((s) => (
-                  <option
-                    key={s}
-                    value={s}
-                    style={{ backgroundColor: STATUS_OPTION_COLORS[s].bg, color: STATUS_OPTION_COLORS[s].fg }}
-                  >
-                    {STATUS_CONFIG[s].label}
-                  </option>
-                ))}
-              </select>
-
-              <select
-                value={categoryFilter}
-                onChange={(e) => setCategoryFilter(e.target.value)}
-                className="rounded-lg border border-input bg-card px-2 py-2 font-mono text-[11px] text-foreground"
-              >
-                <option value="all">Todos os tipos</option>
-                <option value="activity">Passeio</option>
-                <option value="transport">Transporte</option>
-                <option value="accommodation">Hospedagem</option>
-              </select>
             </div>
 
             {activeDestId !== 'ALL' && cityNoteByDestId[activeDestId]?.notes_content && (
@@ -2748,27 +2860,42 @@ function Dashboard({ session }) {
                     type: 'select',
                     options: destinations.map((d) => ({ value: d.id, label: d.city_name })),
                     required: true,
+                    row: 'first',
+                    width: '2/3',
                   },
                 ]
               : []),
-            { name: 'activity_name', label: 'Nome do passeio', required: true },
-            { name: 'assigned_date', label: 'Data', type: 'date' },
-            { name: 'shift', label: 'Turno', type: 'select', options: ['Manhã', 'Tarde', 'Noite'] },
-            { name: 'exact_time', label: 'Horário exato', type: 'time' },
-            { name: 'total_cost_eur', label: 'Valor total', type: 'number' },
-            {
-              name: 'responsavel',
-              label: 'Responsável pelo Pagamento',
-              type: 'select',
-              options: responsavelOptions,
-              default: 'individual',
-            },
             {
               name: 'status',
               label: 'Status',
               type: 'select',
               options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
               default: 'planejando',
+              variant: 'status-pill',
+              row: 'first',
+              width: activeDestId === 'ALL' ? '1/3' : undefined,
+            },
+            { name: 'activity_name', label: 'Nome do passeio', required: true },
+            { name: 'assigned_date', label: 'Data', type: 'date' },
+            { name: 'exact_time', label: 'Horário exato', type: 'time' },
+            {
+              name: 'shift',
+              label: 'Turno',
+              type: 'select',
+              options: ['Manhã', 'Tarde', 'Noite'],
+              // Some assim que a pessoa preenche um horário exato, já que os
+              // dois viram redundantes.
+              hideWhen: (values) => !!values.exact_time,
+            },
+            { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
+            {
+              name: 'responsavel',
+              label: 'Quem Pagou',
+              type: 'select',
+              options: responsavelOptions,
+              default: 'individual',
+              row: 'money',
+              width: '2/3',
             },
             { name: 'booking_rule', label: 'Regra de compra' },
             { name: 'ticket_url', label: 'Link do ingresso', type: 'url' },
@@ -2784,27 +2911,36 @@ function Dashboard({ session }) {
           onClose={() => setOpenSheet(null)}
           onSubmit={handleAddTransport}
           fields={[
-            { name: 'origin_city', label: 'Cidade de origem', required: true, default: activeDest?.city_name ?? '' },
-            { name: 'origin_station', label: 'Estação/aeroporto de saída (opcional)' },
-            { name: 'destination_city', label: 'Cidade de destino', required: true },
-            { name: 'destination_station', label: 'Estação/aeroporto de chegada (opcional)' },
-            { name: 'departure_date', label: 'Data de partida', type: 'date' },
-            { name: 'departure_time', label: 'Hora de partida', type: 'time' },
-            { name: 'arrival_time', label: 'Hora de chegada', type: 'time' },
-            { name: 'total_cost_eur', label: 'Valor total', type: 'number' },
             {
-              name: 'responsavel',
-              label: 'Responsável pelo Pagamento',
-              type: 'select',
-              options: responsavelOptions,
-              default: 'individual',
+              name: 'origin_city',
+              label: 'Cidade de Origem',
+              required: true,
+              default: activeDest?.city_name ?? '',
+              row: 'cities',
             },
+            { name: 'destination_city', label: 'Cidade de Destino', required: true, row: 'cities' },
+            { name: 'origin_station', label: 'Estação/aeroporto de saída (opcional)', row: 'stations' },
+            { name: 'destination_station', label: 'Estação/aeroporto de chegada (opcional)', row: 'stations' },
+            { name: 'departure_date', label: 'Data de partida', type: 'date' },
+            { name: 'departure_time', label: 'Hora de partida', type: 'time', row: 'times', width: '1/2' },
+            { name: 'arrival_time', label: 'Hora de chegada', type: 'time', row: 'times', width: '1/2' },
             {
               name: 'status',
               label: 'Status',
               type: 'select',
               options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
               default: 'planejando',
+              variant: 'status-pill',
+            },
+            { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
+            {
+              name: 'responsavel',
+              label: 'Quem Pagou',
+              type: 'select',
+              options: responsavelOptions,
+              default: 'individual',
+              row: 'money',
+              width: '2/3',
             },
             { name: 'comments', label: 'Comentários', type: 'textarea' },
           ]}
@@ -2826,26 +2962,33 @@ function Dashboard({ session }) {
                     type: 'select',
                     options: destinations.map((d) => ({ value: d.id, label: d.city_name })),
                     required: true,
+                    row: 'first',
+                    width: '2/3',
                   },
                 ]
               : []),
-            { name: 'hotel_name', label: 'Nome do hotel', required: true },
-            { name: 'check_in', label: 'Check-in', type: 'date' },
-            { name: 'check_out', label: 'Check-out', type: 'date' },
-            { name: 'total_cost_eur', label: 'Valor total', type: 'number' },
-            {
-              name: 'responsavel',
-              label: 'Responsável pelo Pagamento',
-              type: 'select',
-              options: responsavelOptions,
-              default: 'individual',
-            },
             {
               name: 'status',
               label: 'Status',
               type: 'select',
               options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
               default: 'planejando',
+              variant: 'status-pill',
+              row: 'first',
+              width: activeDestId === 'ALL' ? '1/3' : undefined,
+            },
+            { name: 'hotel_name', label: 'Nome do hotel', required: true },
+            { name: 'check_in', label: 'Check-in', type: 'date' },
+            { name: 'check_out', label: 'Check-out', type: 'date' },
+            { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
+            {
+              name: 'responsavel',
+              label: 'Quem Pagou',
+              type: 'select',
+              options: responsavelOptions,
+              default: 'individual',
+              row: 'money',
+              width: '2/3',
             },
             { name: 'cancellation_deadline', label: 'Prazo de cancelamento', type: 'date' },
             { name: 'booking_link', label: 'Link da reserva', type: 'url' },
@@ -2867,30 +3010,43 @@ function Dashboard({ session }) {
           onSubmit={(form) => handleUpdateActivity(editingItem.data, form)}
           onDelete={() => handleDeleteActivity(editingItem.data)}
           fields={[
-            { name: 'activity_name', label: 'Nome do passeio', required: true },
             {
               name: 'destination_id',
               label: 'Cidade',
               type: 'select',
               options: destinations.map((d) => ({ value: d.id, label: d.city_name })),
               required: true,
-            },
-            { name: 'assigned_date', label: 'Data', type: 'date' },
-            { name: 'shift', label: 'Turno', type: 'select', options: ['Manhã', 'Tarde', 'Noite'] },
-            { name: 'exact_time', label: 'Horário exato', type: 'time' },
-            { name: 'total_cost_eur', label: 'Valor total', type: 'number' },
-            {
-              name: 'responsavel',
-              label: 'Responsável pelo Pagamento',
-              type: 'select',
-              options: responsavelOptions,
-              default: 'individual',
+              row: 'first',
+              width: '2/3',
             },
             {
               name: 'status',
               label: 'Status',
               type: 'select',
               options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
+              variant: 'status-pill',
+              row: 'first',
+              width: '1/3',
+            },
+            { name: 'activity_name', label: 'Nome do passeio', required: true },
+            { name: 'assigned_date', label: 'Data', type: 'date' },
+            { name: 'exact_time', label: 'Horário exato', type: 'time' },
+            {
+              name: 'shift',
+              label: 'Turno',
+              type: 'select',
+              options: ['Manhã', 'Tarde', 'Noite'],
+              hideWhen: (values) => !!values.exact_time,
+            },
+            { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
+            {
+              name: 'responsavel',
+              label: 'Quem Pagou',
+              type: 'select',
+              options: responsavelOptions,
+              default: 'individual',
+              row: 'money',
+              width: '2/3',
             },
             { name: 'booking_rule', label: 'Regra de compra' },
             { name: 'ticket_url', label: 'Link do ingresso', type: 'url' },
@@ -2911,26 +3067,29 @@ function Dashboard({ session }) {
           onSubmit={(form) => handleUpdateTransport(editingItem.data, form)}
           onDelete={() => handleDeleteTransport(editingItem.data)}
           fields={[
-            { name: 'origin_city', label: 'Cidade de origem', required: true },
-            { name: 'origin_station', label: 'Estação/aeroporto de saída (opcional)' },
-            { name: 'destination_city', label: 'Cidade de destino', required: true },
-            { name: 'destination_station', label: 'Estação/aeroporto de chegada (opcional)' },
+            { name: 'origin_city', label: 'Cidade de Origem', required: true, row: 'cities' },
+            { name: 'destination_city', label: 'Cidade de Destino', required: true, row: 'cities' },
+            { name: 'origin_station', label: 'Estação/aeroporto de saída (opcional)', row: 'stations' },
+            { name: 'destination_station', label: 'Estação/aeroporto de chegada (opcional)', row: 'stations' },
             { name: 'departure_date', label: 'Data de partida', type: 'date' },
-            { name: 'departure_time', label: 'Hora de partida', type: 'time' },
-            { name: 'arrival_time', label: 'Hora de chegada', type: 'time' },
-            { name: 'total_cost_eur', label: 'Valor total', type: 'number' },
-            {
-              name: 'responsavel',
-              label: 'Responsável pelo Pagamento',
-              type: 'select',
-              options: responsavelOptions,
-              default: 'individual',
-            },
+            { name: 'departure_time', label: 'Hora de partida', type: 'time', row: 'times', width: '1/2' },
+            { name: 'arrival_time', label: 'Hora de chegada', type: 'time', row: 'times', width: '1/2' },
             {
               name: 'status',
               label: 'Status',
               type: 'select',
               options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
+              variant: 'status-pill',
+            },
+            { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
+            {
+              name: 'responsavel',
+              label: 'Quem Pagou',
+              type: 'select',
+              options: responsavelOptions,
+              default: 'individual',
+              row: 'money',
+              width: '2/3',
             },
             { name: 'comments', label: 'Comentários', type: 'textarea' },
           ]}
@@ -2949,22 +3108,36 @@ function Dashboard({ session }) {
           onSubmit={(form) => handleUpdateAccommodation(editingItem.data, form)}
           onDelete={() => handleDeleteAccommodation(editingItem.data)}
           fields={[
-            { name: 'hotel_name', label: 'Nome do hotel', required: true },
-            { name: 'check_in', label: 'Check-in', type: 'date' },
-            { name: 'check_out', label: 'Check-out', type: 'date' },
-            { name: 'total_cost_eur', label: 'Valor total', type: 'number' },
             {
-              name: 'responsavel',
-              label: 'Responsável pelo Pagamento',
+              name: 'destination_id',
+              label: 'Cidade',
               type: 'select',
-              options: responsavelOptions,
-              default: 'individual',
+              options: destinations.map((d) => ({ value: d.id, label: d.city_name })),
+              required: true,
+              row: 'first',
+              width: '2/3',
             },
             {
               name: 'status',
               label: 'Status',
               type: 'select',
               options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
+              variant: 'status-pill',
+              row: 'first',
+              width: '1/3',
+            },
+            { name: 'hotel_name', label: 'Nome do hotel', required: true },
+            { name: 'check_in', label: 'Check-in', type: 'date' },
+            { name: 'check_out', label: 'Check-out', type: 'date' },
+            { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
+            {
+              name: 'responsavel',
+              label: 'Quem Pagou',
+              type: 'select',
+              options: responsavelOptions,
+              default: 'individual',
+              row: 'money',
+              width: '2/3',
             },
             { name: 'cancellation_deadline', label: 'Prazo de cancelamento', type: 'date' },
             { name: 'booking_link', label: 'Link da reserva', type: 'url' },
@@ -2983,13 +3156,15 @@ function Dashboard({ session }) {
             { name: 'description', label: 'Descrição', required: true, suggestions: expenseSuggestions },
             { name: 'transaction_date', label: 'Data', type: 'date', default: todayIso() },
             { name: 'category', label: 'Categoria', type: 'select', options: EXPENSE_CATEGORIES },
-            { name: 'total_cost_eur', label: 'Valor total', type: 'number' },
+            { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
             {
               name: 'responsavel',
-              label: 'Responsável pelo Pagamento',
+              label: 'Quem Pagou',
               type: 'select',
               options: responsavelOptions,
               default: 'individual',
+              row: 'money',
+              width: '2/3',
             },
           ]}
         />
