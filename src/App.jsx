@@ -909,8 +909,12 @@ function Dashboard({ session }) {
   const [overviewAccommodations, setOverviewAccommodations] = useState([])
   const [overviewActivities, setOverviewActivities] = useState([])
   const [overviewTransport, setOverviewTransport] = useState([])
-  const [includePendenteInEstimate, setIncludePendenteInEstimate] = useState(false)
-  const [includeAtrasadoInEstimate, setIncludeAtrasadoInEstimate] = useState(false)
+  const [includePendenteAtrasado, setIncludePendenteAtrasado] = useState(false)
+  const [includePlanejando, setIncludePlanejando] = useState(false)
+  const [gastosUserFilter, setGastosUserFilter] = useState('') // preenchido via effect abaixo
+  const [ledgerDrawerOpen, setLedgerDrawerOpen] = useState(false)
+  const [ledgerFilters, setLedgerFilters] = useState({ category: 'all', paidBy: 'all', city: 'all', status: 'all' })
+  const [editingExpense, setEditingExpense] = useState(null)
   const [loading, setLoading] = useState(true)
   const [openSheet, setOpenSheet] = useState(null) // 'activity' | 'transport' | 'expense' | null
   const [editingItem, setEditingItem] = useState(null) // { kind: 'activity' | 'transport', data: {...} } | null
@@ -1065,6 +1069,13 @@ function Dashboard({ session }) {
     [travelers, session.user.id]
   )
   const currentTravelerName = currentTraveler?.name ?? session.user.email
+
+  // Pré-seleciona o usuário logado no filtro de "Total da Viagem" assim que
+  // soubermos quem ele é — só na primeira vez (não sobrescreve se a pessoa
+  // já trocou manualmente pra "Todos" ou outro nome).
+  useEffect(() => {
+    if (!gastosUserFilter && currentTravelerName) setGastosUserFilter(currentTravelerName)
+  }, [currentTravelerName, gastosUserFilter])
 
   // Opções do dropdown único "Responsável pelo Pagamento": 'individual' (padrão
   // — cada um paga o seu, sem gerar cobrança) ou o nome de um viajante
@@ -1993,19 +2004,28 @@ function Dashboard({ session }) {
     }))
   }, [expenses, travelers])
 
-  const grandTotal = useMemo(
-    () => expenses.reduce((sum, e) => sum + (Number(e.total_cost_eur) || 0), 0),
-    [expenses]
+  // Gastos filtrados pelo dropdown de usuário da seção "Total da viagem"
+  // (independente do drawer de Lançamentos, que tem seus próprios filtros).
+  const gastosFilteredExpenses = useMemo(
+    () => (gastosUserFilter === 'Todos' ? expenses : expenses.filter((e) => e.paid_by === gastosUserFilter)),
+    [expenses, gastosUserFilter]
   )
 
+  const grandTotal = useMemo(
+    () => gastosFilteredExpenses.reduce((sum, e) => sum + (Number(e.total_cost_eur) || 0), 0),
+    [gastosFilteredExpenses]
+  )
+
+  // Sempre mostra as 5 categorias do sistema, na mesma ordem, mesmo com
+  // total zero — o eixo do gráfico não "pula" categoria sem gasto.
   const categoryTotals = useMemo(() => {
-    const totals = {}
-    for (const e of expenses) {
-      const cat = e.category || 'Outros'
+    const totals = Object.fromEntries(EXPENSE_CATEGORIES.map((c) => [c, 0]))
+    for (const e of gastosFilteredExpenses) {
+      const cat = EXPENSE_CATEGORIES.includes(e.category) ? e.category : 'Outros'
       totals[cat] = (totals[cat] ?? 0) + (Number(e.total_cost_eur) || 0)
     }
-    return Object.entries(totals).sort((a, b) => b[1] - a[1])
-  }, [expenses])
+    return EXPENSE_CATEGORIES.map((c) => [c, totals[c]])
+  }, [gastosFilteredExpenses])
 
   const maxCategoryAmount = useMemo(
     () => Math.max(1, ...categoryTotals.map(([, amount]) => amount)),
@@ -2014,14 +2034,17 @@ function Dashboard({ session }) {
 
   // Estimativa de custo com base nos pontos do roteiro (passeios, transportes
   // e hospedagens de TODAS as cidades) — independente de já ter sido lançado
-  // um gasto de verdade ou não. Por padrão só soma "confirmado"; os
-  // checkboxes na tela de Gastos permitem incluir "pendente" e "atrasado".
+  // um gasto de verdade ou não. "Confirmado" é sempre incluído; os outros
+  // dois grupos de status são opcionais via checkbox.
   const estimateStatuses = useMemo(() => {
     const set = new Set(['confirmado'])
-    if (includePendenteInEstimate) set.add('pendente')
-    if (includeAtrasadoInEstimate) set.add('atrasado')
+    if (includePendenteAtrasado) {
+      set.add('pendente')
+      set.add('atrasado')
+    }
+    if (includePlanejando) set.add('planejando')
     return set
-  }, [includePendenteInEstimate, includeAtrasadoInEstimate])
+  }, [includePendenteAtrasado, includePlanejando])
 
   const roteiroEstimateTotal = useMemo(() => {
     let total = 0
@@ -2342,21 +2365,21 @@ function Dashboard({ session }) {
                     <button
                       type="button"
                       onClick={() => isAccordion && toggleDay(date)}
-                      className={`mb-1.5 flex w-full items-center justify-between font-mono text-[11px] uppercase tracking-wide ${
+                      className={`mb-1.5 flex w-full items-center justify-between font-mono uppercase tracking-wide ${
                         isAccordion ? 'cursor-pointer' : 'cursor-default'
                       }`}
                     >
-                      <span className="text-foreground">
+                      <span className="text-[11px] font-semibold text-foreground">
                         {date === 'Sem data' ? date : formatDate(date)}
                         {contextLabel && ` · ${contextLabel}`}
                       </span>
-                      <span className="flex shrink-0 items-center gap-1 pl-2 text-muted-foreground">
+                      <span className="flex shrink-0 items-center gap-1 pl-2 text-[9px] font-normal text-muted-foreground/70">
                         {realItems.length} {realItems.length === 1 ? 'item' : 'itens'}
                         {isAccordion &&
                           (isExpanded ? (
-                            <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                            <ChevronUp className="h-3 w-3" aria-hidden="true" />
                           ) : (
-                            <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                            <ChevronDown className="h-3 w-3" aria-hidden="true" />
                           ))}
                       </span>
                     </button>
@@ -2370,154 +2393,143 @@ function Dashboard({ session }) {
                         )}
                         {realItems.map((item, idx) => {
                           const isAccommodation = item.kind === 'accommodation'
+                          const ItemIcon = item.kind === 'activity' ? Ticket : item.kind === 'transport' ? Plane : Hotel
+                          const showCost = item.data.total_cost_eur != null && item.data.status !== 'confirmado'
+                          const mapsUrl = mapsUrlFor(item)
+
+                          // Monta a linha de detalhes sem nunca deixar um
+                          // travessão de campo vazio — só entra o que existir.
+                          const detailParts = []
+                          if (
+                            activeDestId === 'ALL' &&
+                            (item.kind === 'activity' || isAccommodation) &&
+                            destById[item.data.destination_id]
+                          ) {
+                            detailParts.push(destById[item.data.destination_id])
+                          }
+                          if (isAccommodation) {
+                            const range = dateRangeLabel(item.data.check_in, item.data.check_out)
+                            if (range) detailParts.push(range)
+                          }
+                          // "Turno" só aparece se não houver horário exato —
+                          // com os dois juntos, um vira redundante.
+                          if (item.kind === 'activity' && item.data.shift && !item.data.exact_time) {
+                            detailParts.push(item.data.shift)
+                          }
+                          // Custo só aparece se o status NÃO for "confirmado"
+                          // (uma vez confirmado, o valor já está no extrato
+                          // de gastos — repetir aqui só polui a timeline).
+                          if (showCost) {
+                            detailParts.push(`${formatMoney(perPersonCost(item.data))}/pessoa`)
+                          }
+
+                          const stationParts =
+                            item.kind === 'transport' && (item.data.origin_station || item.data.destination_station)
+                              ? item.data.origin_station && item.data.destination_station
+                                ? `${item.data.origin_station} → ${item.data.destination_station}`
+                                : item.data.origin_station || item.data.destination_station
+                              : null
+
                           return (
-                            <div
-                              key={`${item.kind}-${item.data.id ?? idx}`}
-                              className={`flex items-start justify-between gap-2 rounded-xl border border-border bg-card ${
-                                isAccommodation ? 'p-2' : 'p-3'
-                              }`}
-                            >
-                              <div className="flex items-start gap-2">
-                                <div className="flex flex-col items-center gap-1">
-                                  {item.kind === 'activity' && (
-                                    <Ticket className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
+                            <div key={`${item.kind}-${item.data.id ?? idx}`} className="flex items-stretch gap-2">
+                              {/* Trilho externo: ícone "nu" em Vintage Blue direto sobre o
+                                  fundo Warm Cream, sem card/borda/fundo próprio, formando
+                                  uma coluna contínua de diário de viagem. */}
+                              <div className="flex w-5 shrink-0 flex-col items-center">
+                                <ItemIcon
+                                  className={`mt-1 shrink-0 text-primary ${isAccommodation ? 'h-3.5 w-3.5' : 'h-4 w-4'}`}
+                                  aria-hidden="true"
+                                />
+                                {idx < realItems.length - 1 && (
+                                  <div className="mt-1 w-px flex-1 bg-border" aria-hidden="true" />
+                                )}
+                              </div>
+
+                              <div
+                                className={`flex flex-1 items-start justify-between gap-2 rounded-xl border border-border bg-card ${
+                                  isAccommodation ? 'p-2' : 'p-3'
+                                }`}
+                              >
+                                <div className="flex items-start gap-2">
+                                  {!isAccommodation && item.time && (
+                                    <span className="shrink-0 pt-0.5 font-mono text-[11px] font-semibold text-foreground">
+                                      {item.time.slice(0, 5)}
+                                    </span>
                                   )}
-                                  {item.kind === 'transport' && (
-                                    <Plane className="mt-0.5 h-4 w-4 shrink-0 text-primary" aria-hidden="true" />
-                                  )}
-                                  {isAccommodation && (
-                                    <Hotel className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
-                                  )}
-                                  {item.kind === 'activity' && (
-                                    <a
-                                      href={buildMapsSearchUrl(
-                                        `${item.data.activity_name} ${
-                                          activeDestId === 'ALL'
-                                            ? destById[item.data.destination_id] ?? ''
-                                            : activeDest?.city_name ?? ''
-                                        }`
-                                      )}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      onClick={(e) => e.stopPropagation()}
-                                      title="Como chegar"
-                                      aria-label={`Como chegar: ${item.data.activity_name}`}
-                                      className="flex flex-col items-center gap-0.5 rounded-lg px-1 py-1 text-primary transition-colors hover:bg-primary/10 active:bg-primary/15"
-                                    >
-                                      <MapPin className="h-3.5 w-3.5" aria-hidden="true" />
-                                      <span className="font-mono text-[8px] uppercase leading-none tracking-wide">
-                                        Mapa
-                                      </span>
-                                    </a>
-                                  )}
-                                  {item.kind === 'transport' && (
-                                    <a
-                                      href={buildMapsSearchUrl(
-                                        item.data.origin_station || item.data.origin_city
-                                      )}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      onClick={(e) => e.stopPropagation()}
-                                      title="Como chegar (local de partida)"
-                                      aria-label={`Como chegar ao local de partida: ${
-                                        item.data.origin_station || item.data.origin_city
-                                      }`}
-                                      className="flex flex-col items-center gap-0.5 rounded-lg px-1 py-1 text-primary transition-colors hover:bg-primary/10 active:bg-primary/15"
-                                    >
-                                      <MapPin className="h-3.5 w-3.5" aria-hidden="true" />
-                                      <span className="font-mono text-[8px] uppercase leading-none tracking-wide">
-                                        Mapa
-                                      </span>
-                                    </a>
-                                  )}
-                                  {isAccommodation && (
-                                    <a
-                                      href={buildMapsSearchUrl(
-                                        `${item.data.hotel_name} ${
-                                          activeDestId === 'ALL'
-                                            ? destById[item.data.destination_id] ?? ''
-                                            : activeDest?.city_name ?? ''
-                                        }`
-                                      )}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      onClick={(e) => e.stopPropagation()}
-                                      title="Como chegar"
-                                      aria-label={`Como chegar: ${item.data.hotel_name}`}
-                                      className="flex flex-col items-center gap-0.5 rounded-lg px-1 py-0.5 text-primary transition-colors hover:bg-primary/10 active:bg-primary/15"
-                                    >
-                                      <MapPin className="h-3 w-3" aria-hidden="true" />
-                                    </a>
-                                  )}
-                                </div>
-                                <div>
-                                  <p className={`font-medium text-foreground ${isAccommodation ? 'text-sm' : ''}`}>
-                                    {item.kind === 'activity' && item.data.activity_name}
-                                    {item.kind === 'transport' &&
-                                      `${item.data.origin_city} → ${item.data.destination_city}`}
-                                    {isAccommodation && item.data.hotel_name}
-                                  </p>
-                                  <p className="font-mono text-[11px] text-muted-foreground">
-                                    {activeDestId === 'ALL' &&
-                                      (item.kind === 'activity' || isAccommodation) &&
-                                      destById[item.data.destination_id]
-                                      ? `${destById[item.data.destination_id]} · `
-                                      : ''}
-                                    {isAccommodation
-                                      ? `${formatDate(item.data.check_in)} → ${formatDate(item.data.check_out)}`
-                                      : item.time ?? '—'}
-                                    {item.kind === 'activity' && item.data.shift ? ` · ${item.data.shift}` : ''}
-                                    {item.data.total_cost_eur != null &&
-                                      ` · ${formatMoney(perPersonCost(item.data))}/pessoa`}
-                                  </p>
-                                  {item.kind === 'transport' &&
-                                    (item.data.origin_station || item.data.destination_station) && (
-                                      <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">
-                                        {item.data.origin_station || '—'} → {item.data.destination_station || '—'}
+                                  <div>
+                                    <p className={`font-medium text-foreground ${isAccommodation ? 'text-sm' : ''}`}>
+                                      {item.kind === 'activity' && item.data.activity_name}
+                                      {item.kind === 'transport' &&
+                                        `${item.data.origin_city} → ${item.data.destination_city}`}
+                                      {isAccommodation && item.data.hotel_name}
+                                    </p>
+                                    {detailParts.length > 0 && (
+                                      <p className="font-mono text-[11px] text-muted-foreground">
+                                        {detailParts.join(' · ')}
                                       </p>
                                     )}
-                                  {item.kind === 'activity' && item.data.booking_rule && (
-                                    <p className="mt-1 inline-flex items-center gap-1 rounded-md bg-accent/15 px-1.5 py-0.5 font-mono text-[10px] text-accent">
-                                      <AlertCircle className="h-3 w-3 shrink-0" aria-hidden="true" />
-                                      {item.data.booking_rule}
-                                    </p>
-                                  )}
-                                  {item.kind === 'activity' && item.data.ticket_url && (
-                                    <a
-                                      href={item.data.ticket_url}
-                                      target="_blank"
-                                      rel="noopener noreferrer"
-                                      onClick={(e) => e.stopPropagation()}
-                                      className="mt-1 inline-flex items-center gap-1 font-mono text-[10px] text-primary underline underline-offset-2"
-                                    >
-                                      <ExternalLink className="h-3 w-3 shrink-0" aria-hidden="true" />
-                                      Abrir ingresso
-                                    </a>
-                                  )}
+                                    {stationParts && (
+                                      <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">
+                                        {stationParts}
+                                      </p>
+                                    )}
+                                    {item.kind === 'activity' && item.data.booking_rule && (
+                                      <p className="mt-1 inline-flex items-center gap-1 rounded-md bg-accent/15 px-1.5 py-0.5 font-mono text-[10px] text-accent">
+                                        <AlertCircle className="h-3 w-3 shrink-0" aria-hidden="true" />
+                                        {item.data.booking_rule}
+                                      </p>
+                                    )}
+                                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+                                      {mapsUrl && (
+                                        <a
+                                          href={mapsUrl}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          onClick={(e) => e.stopPropagation()}
+                                          className="inline-flex items-center gap-1 font-mono text-[10px] text-primary underline underline-offset-2"
+                                        >
+                                          <MapPin className="h-3 w-3 shrink-0" aria-hidden="true" />
+                                          Como chegar
+                                        </a>
+                                      )}
+                                      {item.kind === 'activity' && item.data.ticket_url && (
+                                        <a
+                                          href={item.data.ticket_url}
+                                          target="_blank"
+                                          rel="noopener noreferrer"
+                                          onClick={(e) => e.stopPropagation()}
+                                          className="inline-flex items-center gap-1 font-mono text-[10px] text-primary underline underline-offset-2"
+                                        >
+                                          <ExternalLink className="h-3 w-3 shrink-0" aria-hidden="true" />
+                                          Abrir ingresso
+                                        </a>
+                                      )}
+                                    </div>
+                                  </div>
                                 </div>
-                              </div>
-                              <div className="flex items-center gap-1">
-                                <StatusBadge
-                                  status={item.data.status}
-                                  onChange={(newStatus) =>
-                                    handleStatusChange(
-                                      item.kind === 'activity'
-                                        ? 'itinerary_activities'
-                                        : item.kind === 'transport'
-                                        ? 'transport'
-                                        : 'accommodations',
-                                      item.data.id,
-                                      newStatus
-                                    )
-                                  }
-                                />
-                                <button
-                                  onClick={() => setEditingItem({ kind: item.kind, data: item.data })}
-                                  aria-label="Editar"
-                                  className="rounded-full p-1 text-muted-foreground hover:bg-muted"
-                                >
-                                  <Pencil className="h-3.5 w-3.5" />
-                                </button>
+                                <div className="flex shrink-0 flex-col items-center gap-1">
+                                  <StatusBadge
+                                    status={item.data.status}
+                                    onChange={(newStatus) =>
+                                      handleStatusChange(
+                                        item.kind === 'activity'
+                                          ? 'itinerary_activities'
+                                          : item.kind === 'transport'
+                                          ? 'transport'
+                                          : 'accommodations',
+                                        item.data.id,
+                                        newStatus
+                                      )
+                                    }
+                                  />
+                                  <button
+                                    onClick={() => setEditingItem({ kind: item.kind, data: item.data })}
+                                    aria-label="Editar"
+                                    className="rounded-full p-1 text-muted-foreground hover:bg-muted"
+                                  >
+                                    <Pencil className="h-3.5 w-3.5" />
+                                  </button>
+                                </div>
                               </div>
                             </div>
                           )
