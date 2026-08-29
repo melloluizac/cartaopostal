@@ -2027,10 +2027,30 @@ function Dashboard({ session }) {
     [alertRows]
   )
 
+  // Estimativa de custo por status: "Confirmado" é sempre incluído; os
+  // outros dois grupos são opcionais via checkbox. Controla o Saldo do
+  // Grupo, o Total da viagem e o gráfico "Por categoria" — os três
+  // respeitam a mesma seleção de status.
+  const estimateStatuses = useMemo(() => {
+    const set = new Set(['confirmado'])
+    if (includePendenteAtrasado) {
+      set.add('pendente')
+      set.add('atrasado')
+    }
+    if (includePlanejando) set.add('planejando')
+    return set
+  }, [includePendenteAtrasado, includePlanejando])
+
+  const statusFilteredExpenses = useMemo(
+    () => expenses.filter((e) => estimateStatuses.has(e.status ?? 'confirmado')),
+    [expenses, estimateStatuses]
+  )
+
   // --- Saldo do grupo (calculado no app, não numa view SQL) --------------
   // "Total pago" soma tudo que a pessoa desembolsou, qualquer tipo de
   // divisão. "Saldo" (a receber/a pagar) só considera os gastos 50/50 — os
-  // "100% Pessoa X" e "Individual" não geram cobrança pra ninguém.
+  // "100% Pessoa X" e "Individual" não geram cobrança pra ninguém. Respeita
+  // os mesmos checkboxes de status da seção "Total da viagem" abaixo.
   const balances = useMemo(() => {
     const totalPaidByName = {}
     const sharedPaidByName = {}
@@ -2039,7 +2059,7 @@ function Dashboard({ session }) {
       totalPaidByName[t.name] = 0
       sharedPaidByName[t.name] = 0
     }
-    for (const e of expenses) {
+    for (const e of statusFilteredExpenses) {
       const cost = Number(e.total_cost_eur) || 0
       if (e.paid_by && totalPaidByName[e.paid_by] !== undefined) {
         totalPaidByName[e.paid_by] += cost
@@ -2053,69 +2073,47 @@ function Dashboard({ session }) {
       totalPaid: totalPaidByName[t.name] ?? 0,
       balance: (sharedPaidByName[t.name] ?? 0) - fairShare,
     }))
-  }, [expenses, travelers])
+  }, [statusFilteredExpenses, travelers])
 
-  // Gastos filtrados pelo dropdown de usuário da seção "Total da viagem"
-  // (independente do drawer de Lançamentos, que tem seus próprios filtros).
-  const gastosFilteredExpenses = useMemo(
-    () => (gastosUserFilter === 'Todos' ? expenses : expenses.filter((e) => e.paid_by === gastosUserFilter)),
-    [expenses, gastosUserFilter]
-  )
+  // Quanto de um gasto é "referente" a uma pessoa — não quanto ela
+  // desembolsou, e sim a parte que é dela de fato. Num gasto 50/50, cada
+  // pessoa é dona de metade (dividido pelo nº de viajantes), não importa
+  // quem pagou. Num gasto Individual, é inteiro de quem pagou e zero pra
+  // qualquer outra pessoa. É essa conta que aparece em "Total da viagem" —
+  // o desembolso de verdade só aparece no "Saldo do grupo" acima.
+  function personShareOf(expense, personName) {
+    const cost = Number(expense.total_cost_eur) || 0
+    if (expense.split_type === 'igual') {
+      return cost / Math.max(travelers.length, 1)
+    }
+    return expense.paid_by === personName ? cost : 0
+  }
 
-  const grandTotal = useMemo(
-    () => gastosFilteredExpenses.reduce((sum, e) => sum + (Number(e.total_cost_eur) || 0), 0),
-    [gastosFilteredExpenses]
-  )
+  const grandTotal = useMemo(() => {
+    if (gastosUserFilter === 'Todos') {
+      return statusFilteredExpenses.reduce((sum, e) => sum + (Number(e.total_cost_eur) || 0), 0)
+    }
+    return statusFilteredExpenses.reduce((sum, e) => sum + personShareOf(e, gastosUserFilter), 0)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statusFilteredExpenses, gastosUserFilter, travelers])
 
   // Sempre mostra as 5 categorias do sistema, na mesma ordem, mesmo com
   // total zero — o eixo do gráfico não "pula" categoria sem gasto.
   const categoryTotals = useMemo(() => {
     const totals = Object.fromEntries(EXPENSE_CATEGORIES.map((c) => [c, 0]))
-    for (const e of gastosFilteredExpenses) {
+    for (const e of statusFilteredExpenses) {
       const cat = EXPENSE_CATEGORIES.includes(e.category) ? e.category : 'Outros'
-      totals[cat] = (totals[cat] ?? 0) + (Number(e.total_cost_eur) || 0)
+      const amount = gastosUserFilter === 'Todos' ? Number(e.total_cost_eur) || 0 : personShareOf(e, gastosUserFilter)
+      totals[cat] = (totals[cat] ?? 0) + amount
     }
     return EXPENSE_CATEGORIES.map((c) => [c, totals[c]])
-  }, [gastosFilteredExpenses])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statusFilteredExpenses, gastosUserFilter, travelers])
 
   const maxCategoryAmount = useMemo(
     () => Math.max(1, ...categoryTotals.map(([, amount]) => amount)),
     [categoryTotals]
   )
-
-  // Estimativa de custo com base nos pontos do roteiro (passeios, transportes
-  // e hospedagens de TODAS as cidades) — independente de já ter sido lançado
-  // um gasto de verdade ou não. "Confirmado" é sempre incluído; os outros
-  // dois grupos de status são opcionais via checkbox.
-  const estimateStatuses = useMemo(() => {
-    const set = new Set(['confirmado'])
-    if (includePendenteAtrasado) {
-      set.add('pendente')
-      set.add('atrasado')
-    }
-    if (includePlanejando) set.add('planejando')
-    return set
-  }, [includePendenteAtrasado, includePlanejando])
-
-  const roteiroEstimateTotal = useMemo(() => {
-    let total = 0
-    for (const a of overviewActivities) {
-      if (estimateStatuses.has(a.status) && a.total_cost_eur != null) {
-        total += Number(a.total_cost_eur)
-      }
-    }
-    for (const t of overviewTransport) {
-      if (estimateStatuses.has(t.status) && t.total_cost_eur != null) {
-        total += Number(t.total_cost_eur)
-      }
-    }
-    for (const acc of overviewAccommodations) {
-      if (estimateStatuses.has(acc.status) && acc.total_cost_eur != null) {
-        total += Number(acc.total_cost_eur)
-      }
-    }
-    return total
-  }, [overviewActivities, overviewTransport, overviewAccommodations, estimateStatuses])
 
   // "Cidade" não é um campo real de expenses_ledger — extrai de forma
   // aproximada o texto entre parênteses no fim da descrição (padrão que o
@@ -2687,8 +2685,34 @@ function Dashboard({ session }) {
               </div>
               <p className="font-display text-4xl font-semibold text-foreground">{formatMoney(grandTotal)}</p>
               <p className="mt-1 font-mono text-[10px] text-muted-foreground">
-                Soma dos gastos já lançados{gastosUserFilter !== 'Todos' ? ` por ${gastosUserFilter}` : ''}.
+                Soma dos gastos{gastosUserFilter !== 'Todos' ? ` de ${gastosUserFilter}` : ''} nos status marcados
+                abaixo.
               </p>
+
+              <div className="mt-2 flex flex-col gap-1.5">
+                <label className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
+                  <input type="checkbox" checked readOnly className="accent-primary" />
+                  Confirmado (base, sempre incluído)
+                </label>
+                <label className="flex items-center gap-2 font-mono text-[11px] text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={includePendenteAtrasado}
+                    onChange={(e) => setIncludePendenteAtrasado(e.target.checked)}
+                    className="accent-primary"
+                  />
+                  Somar pendente + atrasado
+                </label>
+                <label className="flex items-center gap-2 font-mono text-[11px] text-foreground">
+                  <input
+                    type="checkbox"
+                    checked={includePlanejando}
+                    onChange={(e) => setIncludePlanejando(e.target.checked)}
+                    className="accent-primary"
+                  />
+                  Somar planejando
+                </label>
+              </div>
 
               <div className="mt-4 flex flex-col gap-2.5">
                 {categoryTotals.map(([cat, amount]) => (
@@ -2715,46 +2739,6 @@ function Dashboard({ session }) {
               <p className="mt-2 font-mono text-[10px] text-muted-foreground">
                 Toque numa categoria pra ver só os lançamentos dela.
               </p>
-            </section>
-
-            <section aria-labelledby="estimativa-heading">
-              <h2
-                id="estimativa-heading"
-                className="mb-2 font-mono text-xs uppercase tracking-wide text-muted-foreground"
-              >
-                Estimativa do roteiro
-              </h2>
-              <p className="font-display text-3xl font-semibold text-foreground">
-                {formatMoney(roteiroEstimateTotal)}
-              </p>
-              <p className="mt-1 font-mono text-[10px] text-muted-foreground">
-                Soma dos custos de passeios, transportes e hospedagens cadastrados, por status — independente de já
-                ter virado gasto lançado.
-              </p>
-              <div className="mt-2 flex flex-col gap-1.5">
-                <label className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
-                  <input type="checkbox" checked readOnly className="accent-primary" />
-                  Confirmado (base, sempre incluído)
-                </label>
-                <label className="flex items-center gap-2 font-mono text-[11px] text-foreground">
-                  <input
-                    type="checkbox"
-                    checked={includePendenteAtrasado}
-                    onChange={(e) => setIncludePendenteAtrasado(e.target.checked)}
-                    className="accent-primary"
-                  />
-                  Somar pendente + atrasado
-                </label>
-                <label className="flex items-center gap-2 font-mono text-[11px] text-foreground">
-                  <input
-                    type="checkbox"
-                    checked={includePlanejando}
-                    onChange={(e) => setIncludePlanejando(e.target.checked)}
-                    className="accent-primary"
-                  />
-                  Somar planejando
-                </label>
-              </div>
             </section>
 
             <button
