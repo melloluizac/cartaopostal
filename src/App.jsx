@@ -1385,7 +1385,16 @@ function Dashboard({ session }) {
   // criado, pra ser salvo de volta em `linked_expense_id` no item de origem.
   // Se o custo total ficar zerado/vazio E não houver gasto prévio, não faz
   // nada — é o cenário de "criei o card ainda sem saber o valor".
-  async function syncLinkedExpense({ existingExpenseId, totalCost, paidBy, splitType, date, description, category }) {
+  async function syncLinkedExpense({
+    existingExpenseId,
+    totalCost,
+    paidBy,
+    splitType,
+    date,
+    description,
+    category,
+    status,
+  }) {
     const cost = Number(totalCost) || 0
 
     if (existingExpenseId) {
@@ -1398,6 +1407,7 @@ function Dashboard({ session }) {
           transaction_date: date || todayIso(),
           description,
           category,
+          status: status || 'confirmado',
         })
         .eq('id', existingExpenseId)
       if (error) throw error
@@ -1417,6 +1427,7 @@ function Dashboard({ session }) {
         total_cost_eur: cost,
         paid_by: paidBy,
         split_type: splitType,
+        status: status || 'confirmado',
         created_by: session.user.id,
       })
       .select('id')
@@ -1500,6 +1511,7 @@ function Dashboard({ session }) {
         date: form.assigned_date,
         description: `Passeio: ${form.activity_name}`,
         category: 'Passeio',
+        status: form.status || 'planejando',
       })
       if (expenseId) {
         await supabase.from('itinerary_activities').update({ linked_expense_id: expenseId }).eq('id', inserted.id)
@@ -1544,6 +1556,7 @@ function Dashboard({ session }) {
         date: form.departure_date,
         description: `Transporte: ${form.origin_city} → ${form.destination_city}`,
         category: 'Transporte',
+        status: form.status || 'planejando',
       })
       if (expenseId) {
         await supabase.from('transport').update({ linked_expense_id: expenseId }).eq('id', inserted.id)
@@ -1587,6 +1600,7 @@ function Dashboard({ session }) {
         date: form.check_in,
         description: `Hospedagem: ${form.hotel_name}`,
         category: 'Hospedagem',
+        status: form.status || 'planejando',
       })
       if (expenseId) {
         await supabase.from('accommodations').update({ linked_expense_id: expenseId }).eq('id', inserted.id)
@@ -1607,8 +1621,42 @@ function Dashboard({ session }) {
       total_cost_eur: form.total_cost_eur ? Number(form.total_cost_eur) : 0,
       paid_by: paidBy,
       split_type: splitType,
+      notes: form.notes || null,
+      // Gasto lançado direto (sem passeio/transporte/hospedagem de origem)
+      // já nasce "confirmado" — é dinheiro que já saiu do bolso na hora.
+      status: 'confirmado',
       created_by: session.user.id,
     })
+    if (error) throw error
+    await refreshFinancials()
+  }
+
+  // Editar/excluir um lançamento direto pelo drawer de Lançamentos. Se esse
+  // gasto for vinculado a um passeio/transporte/hospedagem (linked_expense_id
+  // aponta pra cá), o item de origem continua com seus próprios dados — só o
+  // gasto em si muda.
+  async function handleUpdateExpense(id, form) {
+    const { paidBy, splitType } = resolveResponsavel(form.responsavel)
+    const { error } = await supabase
+      .from('expenses_ledger')
+      .update({
+        total_cost_eur: form.total_cost_eur ? Number(form.total_cost_eur) : 0,
+        paid_by: paidBy,
+        split_type: splitType,
+        category: form.category || null,
+        notes: form.notes || null,
+        status: form.status || 'confirmado',
+      })
+      .eq('id', id)
+    if (error) throw error
+    await refreshFinancials()
+  }
+
+  async function handleDeleteExpense(id) {
+    // linked_expense_id nas outras tabelas tem ON DELETE SET NULL — apagar
+    // aqui não deixa nenhum passeio/transporte/hospedagem "orfão" quebrado,
+    // só desfaz o vínculo automaticamente.
+    const { error } = await supabase.from('expenses_ledger').delete().eq('id', id)
     if (error) throw error
     await refreshFinancials()
   }
@@ -1650,6 +1698,7 @@ function Dashboard({ session }) {
       date: form.assigned_date,
       description: `Passeio: ${form.activity_name}`,
       category: 'Passeio',
+      status: form.status || 'planejando',
     })
     if (expenseId && expenseId !== existing.linked_expense_id) {
       await supabase.from('itinerary_activities').update({ linked_expense_id: expenseId }).eq('id', existing.id)
@@ -1701,6 +1750,7 @@ function Dashboard({ session }) {
       date: form.departure_date,
       description: `Transporte: ${form.origin_city} → ${form.destination_city}`,
       category: 'Transporte',
+      status: form.status || 'planejando',
     })
     if (expenseId && expenseId !== existing.linked_expense_id) {
       await supabase.from('transport').update({ linked_expense_id: expenseId }).eq('id', existing.id)
@@ -1750,6 +1800,7 @@ function Dashboard({ session }) {
       date: form.check_in,
       description: `Hospedagem: ${form.hotel_name}`,
       category: 'Hospedagem',
+      status: form.status || 'planejando',
     })
     if (expenseId && expenseId !== existing.linked_expense_id) {
       await supabase.from('accommodations').update({ linked_expense_id: expenseId }).eq('id', existing.id)
@@ -2065,6 +2116,41 @@ function Dashboard({ session }) {
     }
     return total
   }, [overviewActivities, overviewTransport, overviewAccommodations, estimateStatuses])
+
+  // "Cidade" não é um campo real de expenses_ledger — extrai de forma
+  // aproximada o texto entre parênteses no fim da descrição (padrão que o
+  // autocomplete de passeios já usa, ex: "Coliseu (Roma)"). É uma
+  // aproximação, não um dado estruturado de verdade.
+  const expenseCities = useMemo(() => {
+    const cities = new Set()
+    for (const e of expenses) {
+      const match = e.description?.match(/\(([^)]+)\)\s*$/)
+      if (match) cities.add(match[1])
+    }
+    return Array.from(cities).sort()
+  }, [expenses])
+
+  function expenseCityTag(description) {
+    return description?.match(/\(([^)]+)\)\s*$/)?.[1] ?? null
+  }
+
+  // Lançamentos filtrados pra exibição dentro do drawer de auditoria.
+  const ledgerFilteredExpenses = useMemo(() => {
+    return expenses.filter((e) => {
+      if (ledgerFilters.category !== 'all' && e.category !== ledgerFilters.category) return false
+      if (ledgerFilters.paidBy !== 'all' && e.paid_by !== ledgerFilters.paidBy) return false
+      if (ledgerFilters.status !== 'all' && (e.status ?? 'confirmado') !== ledgerFilters.status) return false
+      if (ledgerFilters.city !== 'all' && expenseCityTag(e.description) !== ledgerFilters.city) return false
+      return true
+    })
+  }, [expenses, ledgerFilters])
+
+  // Abre o drawer de Lançamentos já pré-filtrado — usado pelo drill-down dos
+  // gráficos (clicar numa barra de categoria ou num card de saldo).
+  function openLedgerDrawer(partialFilters) {
+    setLedgerFilters({ category: 'all', paidBy: 'all', city: 'all', status: 'all', ...partialFilters })
+    setLedgerDrawerOpen(true)
+  }
 
   // Contagem regressiva mostrada na tela Início
   const countdownLabel = useMemo(() => {
@@ -2559,29 +2645,75 @@ function Dashboard({ session }) {
                 {balances.map((b) => {
                   const isPositive = b.balance >= 0
                   return (
-                    <div key={b.name} className="rounded-xl border border-border bg-card p-3">
+                    <button
+                      key={b.name}
+                      type="button"
+                      onClick={() => openLedgerDrawer({ paidBy: b.name })}
+                      className="rounded-xl border border-border bg-card p-3 text-left"
+                    >
                       <p className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">{b.name}</p>
                       <p className="font-display text-xl font-semibold text-foreground">{formatMoney(b.totalPaid)}</p>
                       <p className={`font-mono text-[11px] ${isPositive ? 'text-secondary-foreground' : 'text-accent'}`}>
                         {isPositive ? 'a receber ' : 'a pagar '}
                         {formatMoney(Math.abs(b.balance))}
                       </p>
-                    </div>
+                    </button>
                   )
                 })}
               </div>
               <p className="mt-2 font-mono text-[10px] text-muted-foreground">
                 "Total pago" soma tudo que a pessoa desembolsou. "A receber/a pagar" considera só os gastos 50/50.
+                Toque num card pra ver os lançamentos dessa pessoa.
               </p>
             </section>
 
             <section aria-labelledby="total-heading">
-              <h2 id="total-heading" className="mb-2 font-mono text-xs uppercase tracking-wide text-muted-foreground">
-                Total da viagem
-              </h2>
+              <div className="mb-2 flex items-center justify-between">
+                <h2 id="total-heading" className="font-mono text-xs uppercase tracking-wide text-muted-foreground">
+                  Total da viagem
+                </h2>
+                <select
+                  value={gastosUserFilter}
+                  onChange={(e) => setGastosUserFilter(e.target.value)}
+                  className="rounded-md border border-input bg-card px-2 py-1 font-mono text-[10px] text-foreground"
+                >
+                  <option value="Todos">Todos</option>
+                  {travelers.map((t) => (
+                    <option key={t.id} value={t.name}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
               <p className="font-display text-4xl font-semibold text-foreground">{formatMoney(grandTotal)}</p>
               <p className="mt-1 font-mono text-[10px] text-muted-foreground">
-                Soma dos gastos já lançados no extrato abaixo.
+                Soma dos gastos já lançados{gastosUserFilter !== 'Todos' ? ` por ${gastosUserFilter}` : ''}.
+              </p>
+
+              <div className="mt-4 flex flex-col gap-2.5">
+                {categoryTotals.map(([cat, amount]) => (
+                  <button
+                    key={cat}
+                    type="button"
+                    onClick={() => openLedgerDrawer({ category: cat })}
+                    title={formatMoney(amount)}
+                    className="text-left"
+                  >
+                    <div className="mb-1 flex items-center justify-between font-mono text-[11px] text-foreground">
+                      <span>{cat}</span>
+                      <span className="text-muted-foreground">{formatMoney(amount)}</span>
+                    </div>
+                    <div className="h-2 overflow-hidden rounded-full bg-muted">
+                      <div
+                        className="h-2 rounded-full bg-primary transition-all"
+                        style={{ width: `${(amount / maxCategoryAmount) * 100}%` }}
+                      />
+                    </div>
+                  </button>
+                ))}
+              </div>
+              <p className="mt-2 font-mono text-[10px] text-muted-foreground">
+                Toque numa categoria pra ver só os lançamentos dela.
               </p>
             </section>
 
@@ -2602,87 +2734,36 @@ function Dashboard({ session }) {
               <div className="mt-2 flex flex-col gap-1.5">
                 <label className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
                   <input type="checkbox" checked readOnly className="accent-primary" />
-                  Confirmado (sempre incluído)
+                  Confirmado (base, sempre incluído)
                 </label>
                 <label className="flex items-center gap-2 font-mono text-[11px] text-foreground">
                   <input
                     type="checkbox"
-                    checked={includePendenteInEstimate}
-                    onChange={(e) => setIncludePendenteInEstimate(e.target.checked)}
+                    checked={includePendenteAtrasado}
+                    onChange={(e) => setIncludePendenteAtrasado(e.target.checked)}
                     className="accent-primary"
                   />
-                  Somar pendente
+                  Somar pendente + atrasado
                 </label>
                 <label className="flex items-center gap-2 font-mono text-[11px] text-foreground">
                   <input
                     type="checkbox"
-                    checked={includeAtrasadoInEstimate}
-                    onChange={(e) => setIncludeAtrasadoInEstimate(e.target.checked)}
+                    checked={includePlanejando}
+                    onChange={(e) => setIncludePlanejando(e.target.checked)}
                     className="accent-primary"
                   />
-                  Somar atrasado
+                  Somar planejando
                 </label>
               </div>
             </section>
 
-            <section aria-labelledby="categoria-heading">
-              <h2 id="categoria-heading" className="mb-2 font-mono text-xs uppercase tracking-wide text-muted-foreground">
-                Por categoria
-              </h2>
-              {categoryTotals.length === 0 && (
-                <p className="rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
-                  Nenhum gasto lançado ainda.
-                </p>
-              )}
-              <div className="flex flex-col gap-2.5">
-                {categoryTotals.map(([cat, amount]) => (
-                  <div key={cat} title={formatMoney(amount)}>
-                    <div className="mb-1 flex items-center justify-between font-mono text-[11px] text-foreground">
-                      <span>{cat}</span>
-                      <span className="text-muted-foreground">{formatMoney(amount)}</span>
-                    </div>
-                    <div className="h-2 overflow-hidden rounded-full bg-muted">
-                      <div
-                        className="h-2 rounded-full bg-primary transition-all"
-                        style={{ width: `${(amount / maxCategoryAmount) * 100}%` }}
-                      />
-                    </div>
-                  </div>
-                ))}
-              </div>
-            </section>
-
-            <section aria-labelledby="lancamentos-heading">
-              <h2 id="lancamentos-heading" className="mb-2 font-mono text-xs uppercase tracking-wide text-muted-foreground">
-                Lançamentos
-              </h2>
-              {expenses.length === 0 && (
-                <p className="rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
-                  Nenhum gasto lançado ainda.
-                </p>
-              )}
-              <div className="flex flex-col gap-2">
-                {expenses.map((e) => {
-                  const splitLabel = e.split_type === 'igual' ? '50/50' : 'Individual'
-                  return (
-                    <div key={e.id} className="rounded-xl border border-border bg-card p-3">
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <p className="font-medium text-foreground">{e.description}</p>
-                          <p className="font-mono text-[11px] text-muted-foreground">
-                            {e.category ?? 'Sem categoria'} · {formatDate(e.transaction_date)} · {e.paid_by}
-                          </p>
-                        </div>
-                        <p className="font-mono text-sm font-semibold text-foreground">{formatMoney(e.total_cost_eur)}</p>
-                      </div>
-                      <span className="mt-1.5 inline-flex items-center rounded-full border border-border bg-background px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
-                        {splitLabel}
-                      </span>
-                    </div>
-                  )
-                })}
-              </div>
-            </section>
+            <button
+              type="button"
+              onClick={() => openLedgerDrawer({})}
+              className="rounded-lg border border-border bg-card py-3 text-center font-mono text-xs uppercase tracking-wide text-foreground"
+            >
+              Ver todos os Lançamentos
+            </button>
           </div>
         )}
 
@@ -3178,6 +3259,159 @@ function Dashboard({ session }) {
               row: 'money',
               width: '2/3',
             },
+            { name: 'notes', label: 'Notas', type: 'textarea' },
+          ]}
+        />
+      )}
+
+      {/* Drawer de auditoria "Lançamentos" — desliza da direita, altura cheia */}
+      {ledgerDrawerOpen && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-foreground/30 backdrop-blur-sm">
+          <div className="flex h-full w-full max-w-sm flex-col bg-card shadow-lg">
+            <div className="flex items-center justify-between border-b border-border px-4 py-3">
+              <h2 className="font-display text-lg font-semibold text-foreground">Lançamentos</h2>
+              <button
+                onClick={() => setLedgerDrawerOpen(false)}
+                aria-label="Fechar"
+                className="rounded-full p-1 text-muted-foreground hover:bg-muted"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="sticky top-0 z-10 grid grid-cols-2 gap-2 border-b border-border bg-card px-4 py-3">
+              <select
+                value={ledgerFilters.category}
+                onChange={(e) => setLedgerFilters((f) => ({ ...f, category: e.target.value }))}
+                className="rounded-md border border-input bg-background px-2 py-1 font-mono text-[10px] text-foreground"
+              >
+                <option value="all">Categoria</option>
+                {EXPENSE_CATEGORIES.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={ledgerFilters.paidBy}
+                onChange={(e) => setLedgerFilters((f) => ({ ...f, paidBy: e.target.value }))}
+                className="rounded-md border border-input bg-background px-2 py-1 font-mono text-[10px] text-foreground"
+              >
+                <option value="all">Quem Pagou</option>
+                {travelers.map((t) => (
+                  <option key={t.id} value={t.name}>
+                    {t.name}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={ledgerFilters.city}
+                onChange={(e) => setLedgerFilters((f) => ({ ...f, city: e.target.value }))}
+                className="rounded-md border border-input bg-background px-2 py-1 font-mono text-[10px] text-foreground"
+              >
+                <option value="all">Cidade</option>
+                {expenseCities.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={ledgerFilters.status}
+                onChange={(e) => setLedgerFilters((f) => ({ ...f, status: e.target.value }))}
+                className="rounded-md border border-input bg-background px-2 py-1 font-mono text-[10px] text-foreground"
+              >
+                <option value="all">Status</option>
+                {STATUS_ORDER.map((s) => (
+                  <option
+                    key={s}
+                    value={s}
+                    style={{ backgroundColor: STATUS_OPTION_COLORS[s].bg, color: STATUS_OPTION_COLORS[s].fg }}
+                  >
+                    {STATUS_CONFIG[s].label}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="flex-1 overflow-y-auto px-4 py-3">
+              {ledgerFilteredExpenses.length === 0 && (
+                <p className="rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
+                  Nenhum lançamento encontrado com esses filtros.
+                </p>
+              )}
+              <div className="flex flex-col gap-2">
+                {ledgerFilteredExpenses.map((e) => {
+                  const splitLabel = e.split_type === 'igual' ? '50/50' : 'Individual'
+                  return (
+                    <button
+                      key={e.id}
+                      type="button"
+                      onClick={() => setEditingExpense(e)}
+                      className="rounded-xl border border-border bg-card p-3 text-left"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <p className="font-medium text-foreground">{e.description}</p>
+                          <p className="font-mono text-[11px] text-muted-foreground">
+                            {e.category ?? 'Sem categoria'} · {formatDate(e.transaction_date)} · {e.paid_by}
+                          </p>
+                        </div>
+                        <p className="font-mono text-sm font-semibold text-foreground">
+                          {formatMoney(e.total_cost_eur)}
+                        </p>
+                      </div>
+                      <div className="mt-1.5 flex items-center gap-1.5">
+                        <span className="inline-flex items-center rounded-full border border-border bg-background px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                          {splitLabel}
+                        </span>
+                        <StatusBadge status={e.status ?? 'confirmado'} />
+                      </div>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Editar um lançamento (aberto a partir de um card do drawer acima) */}
+      {editingExpense && (
+        <QuickAddSheet
+          title="Editar lançamento"
+          icon={Wallet}
+          onClose={() => setEditingExpense(null)}
+          initialValues={{
+            ...editingExpense,
+            responsavel: editingExpense.split_type === 'igual' ? editingExpense.paid_by : 'individual',
+            status: editingExpense.status ?? 'confirmado',
+          }}
+          onSubmit={(form) => handleUpdateExpense(editingExpense.id, form)}
+          onDelete={() => handleDeleteExpense(editingExpense.id)}
+          fields={[
+            { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
+            {
+              name: 'responsavel',
+              label: 'Quem Pagou',
+              type: 'select',
+              options: responsavelOptions,
+              default: 'individual',
+              row: 'money',
+              width: '2/3',
+            },
+            { name: 'category', label: 'Categoria', type: 'select', options: EXPENSE_CATEGORIES },
+            {
+              name: 'status',
+              label: 'Status',
+              type: 'select',
+              options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
+              variant: 'status-pill',
+            },
+            { name: 'notes', label: 'Notas', type: 'textarea' },
           ]}
         />
       )}
