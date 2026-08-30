@@ -25,6 +25,8 @@ import {
   Link2,
   Copy,
   ArrowRight,
+  UtensilsCrossed,
+  ShoppingBag,
 } from 'lucide-react'
 
 // -----------------------------------------------------------------------
@@ -103,6 +105,16 @@ const STATUS_OPTION_COLORS = {
 
 // Categorias fixas de gasto, pra manter padrão no Controle de Gastos.
 const EXPENSE_CATEGORIES = ['Passeio', 'Transporte', 'Alimentação', 'Compras', 'Hospedagem']
+
+// Mesmos ícones usados nos itens da timeline do Roteiro, pra manter
+// consistência visual entre as duas telas.
+const CATEGORY_ICONS = {
+  Passeio: Ticket,
+  Transporte: Plane,
+  Hospedagem: Hotel,
+  Alimentação: UtensilsCrossed,
+  Compras: ShoppingBag,
+}
 
 // Se `onChange` for passado, o badge vira clicável: um <select> nativo fica
 // posicionado (invisível) por cima do badge inteiro, então o clique em
@@ -2737,7 +2749,7 @@ function Dashboard({ session }) {
 
             <section aria-labelledby="saldo-heading">
               <h2 id="saldo-heading" className="mb-2 flex items-center gap-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground">
-                <Wallet className="h-3.5 w-3.5" /> Saldo do grupo
+                <Wallet className="h-3.5 w-3.5" /> Saldo do grupo: quanto cada um desembolsou
               </h2>
               <div className="grid grid-cols-2 gap-3">
                 {balances.length === 0 && (
@@ -2754,20 +2766,18 @@ function Dashboard({ session }) {
                       onClick={() => openLedgerDrawer({ paidBy: b.name })}
                       className="rounded-xl border border-border bg-card p-3 text-left"
                     >
-                      <p className="font-mono text-[11px] uppercase tracking-wide text-muted-foreground">{b.name}</p>
-                      <p className="font-display text-xl font-semibold text-foreground">{formatMoney(b.totalPaid)}</p>
-                      <p className={`font-mono text-[11px] ${isPositive ? 'text-secondary-foreground' : 'text-accent'}`}>
-                        {isPositive ? 'a receber ' : 'a pagar '}
-                        {formatMoney(Math.abs(b.balance))}
+                      <p className="flex items-baseline gap-1.5 font-mono text-[11px] uppercase tracking-wide">
+                        <span className="text-muted-foreground">{b.name}</span>
+                        <span className={`text-sm font-semibold normal-case ${isPositive ? 'text-secondary-foreground' : 'text-accent'}`}>
+                          {isPositive ? 'a receber ' : 'a pagar '}
+                          {formatMoney(Math.abs(b.balance))}
+                        </span>
                       </p>
+                      <p className="font-display text-base font-semibold text-foreground">{formatMoney(b.totalPaid)}</p>
                     </button>
                   )
                 })}
               </div>
-              <p className="mt-2 font-mono text-[10px] text-muted-foreground">
-                "Total pago" soma tudo que a pessoa desembolsou. "A receber/a pagar" considera só os gastos 50/50.
-                Toque num card pra ver os lançamentos dessa pessoa.
-              </p>
             </section>
 
             <section aria-labelledby="total-heading">
@@ -2788,58 +2798,61 @@ function Dashboard({ session }) {
                   ))}
                 </select>
               </div>
-              <p className="font-display text-4xl font-semibold text-foreground">{formatMoney(grandTotal)}</p>
-              <p className="mt-1 font-mono text-[10px] text-muted-foreground">
-                Soma dos gastos{gastosUserFilter !== 'Todos' ? ` de ${gastosUserFilter}` : ''} nos status marcados
-                abaixo.
-              </p>
 
-              <div className="mt-2 flex flex-col gap-1.5">
-                <label className="flex items-center gap-2 font-mono text-[11px] text-muted-foreground">
-                  <input type="checkbox" checked readOnly className="accent-primary" />
-                  Confirmado (base, sempre incluído)
-                </label>
-                <label className="flex items-center gap-2 font-mono text-[11px] text-foreground">
-                  <input
-                    type="checkbox"
-                    checked={includePendenteAtrasado}
-                    onChange={(e) => setIncludePendenteAtrasado(e.target.checked)}
-                    className="accent-primary"
-                  />
-                  Somar pendente + atrasado
-                </label>
-                <label className="flex items-center gap-2 font-mono text-[11px] text-foreground">
-                  <input
-                    type="checkbox"
-                    checked={includePlanejando}
-                    onChange={(e) => setIncludePlanejando(e.target.checked)}
-                    className="accent-primary"
-                  />
-                  Somar planejando
-                </label>
+              <div className="flex items-center justify-between gap-3">
+                <p className="font-display text-4xl font-semibold text-foreground">{formatMoney(grandTotal)}</p>
+                <div className="flex flex-col gap-1">
+                  <label className="flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground">
+                    <input type="checkbox" checked readOnly className="accent-primary" />
+                    Confirmado
+                  </label>
+                  <label className="flex items-center gap-1.5 font-mono text-[10px] text-foreground">
+                    <input
+                      type="checkbox"
+                      checked={includePendenteAtrasado}
+                      onChange={(e) => setIncludePendenteAtrasado(e.target.checked)}
+                      className="accent-primary"
+                    />
+                    Pendente + atrasado
+                  </label>
+                  <label className="flex items-center gap-1.5 font-mono text-[10px] text-foreground">
+                    <input
+                      type="checkbox"
+                      checked={includePlanejando}
+                      onChange={(e) => setIncludePlanejando(e.target.checked)}
+                      className="accent-primary"
+                    />
+                    Planejando
+                  </label>
+                </div>
               </div>
 
               {/* Barras de orçamento por categoria — farol de cor conforme o
                   % consumido do limite configurado pra pessoa selecionada
                   acima. Categorias sem limite definido ficam num cinza neutro. */}
               <div className="mt-4 flex flex-col gap-3">
-                {budgetProgress.map((row) => (
-                  <div key={row.category}>
-                    <button
-                      type="button"
-                      onClick={() => openLedgerDrawer({ category: row.category })}
-                      className="mb-1 flex w-full items-center justify-between font-mono text-[11px] text-foreground"
-                    >
-                      <span>{row.category}</span>
-                      <span className="text-muted-foreground">
-                        {formatMoney(row.spent)}
-                        {row.limit != null && ` / ${formatMoney(row.limit)}`}
-                      </span>
-                    </button>
-                    <div className="h-2 overflow-hidden rounded-full bg-muted">
-                      <div
-                        className={`h-2 rounded-full transition-all ${
-                          row.limit == null
+                {budgetProgress.map((row) => {
+                  const CategoryIcon = CATEGORY_ICONS[row.category]
+                  return (
+                    <div key={row.category}>
+                      <button
+                        type="button"
+                        onClick={() => openLedgerDrawer({ category: row.category })}
+                        className="mb-1 flex w-full items-center justify-between font-mono text-[11px] text-foreground"
+                      >
+                        <span className="flex items-center gap-1.5">
+                          {CategoryIcon && <CategoryIcon className="h-3.5 w-3.5 text-primary" aria-hidden="true" />}
+                          {row.category}
+                        </span>
+                        <span className="text-muted-foreground">
+                          {formatMoney(row.spent)}
+                          {row.limit != null && ` / ${formatMoney(row.limit)}`}
+                        </span>
+                      </button>
+                      <div className="h-2 overflow-hidden rounded-full bg-muted">
+                        <div
+                          className={`h-2 rounded-full transition-all ${
+                            row.limit == null
                             ? 'bg-muted-foreground/40'
                             : row.color === 'atrasado'
                             ? 'bg-rosewood'
@@ -2872,7 +2885,8 @@ function Dashboard({ session }) {
                       <p className="mt-1 font-mono text-[10px] text-muted-foreground">Sem orçamento definido</p>
                     )}
                   </div>
-                ))}
+                  )
+                })}
               </div>
               <p className="mt-2 font-mono text-[10px] text-muted-foreground">
                 Toque numa categoria pra ver só os lançamentos dela.
