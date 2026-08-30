@@ -912,6 +912,8 @@ function Dashboard({ session }) {
   const [includePendenteAtrasado, setIncludePendenteAtrasado] = useState(false)
   const [includePlanejando, setIncludePlanejando] = useState(false)
   const [gastosUserFilter, setGastosUserFilter] = useState('') // preenchido via effect abaixo
+  const [budgets, setBudgets] = useState([]) // linhas de trip_budgets
+  const [budgetSheetOpen, setBudgetSheetOpen] = useState(false)
   const [ledgerDrawerOpen, setLedgerDrawerOpen] = useState(false)
   const [ledgerFilters, setLedgerFilters] = useState({ category: 'all', paidBy: 'all', city: 'all', status: 'all' })
   const [editingExpense, setEditingExpense] = useState(null)
@@ -1257,21 +1259,42 @@ function Dashboard({ session }) {
   }, [activeDestId, loadItineraryData])
 
   // Recarrega o extrato de gastos (já filtrado pelo RLS: entradas
-  // "Individual" de outra conta simplesmente não voltam nessa consulta) e
-  // os alertas de cancelamento.
+  // "Individual" de outra conta simplesmente não voltam nessa consulta),
+  // os orçamentos configurados e os alertas de cancelamento.
   const refreshFinancials = useCallback(async () => {
     if (!trip) return
-    const [expensesRes, alertRes] = await Promise.all([
+    const [expensesRes, budgetsRes, alertRes] = await Promise.all([
       supabase.from('expenses_ledger').select('*').eq('trip_id', trip.id).order('transaction_date', { ascending: false }),
+      supabase.from('trip_budgets').select('*').eq('trip_id', trip.id),
       supabase.from('view_hotel_cancellation_alerts').select('*').eq('trip_id', trip.id),
     ])
     setExpenses(expensesRes.data ?? [])
+    setBudgets(budgetsRes.data ?? [])
     setAlertRows(alertRes.data ?? [])
   }, [trip])
 
   useEffect(() => {
     refreshFinancials()
   }, [refreshFinancials])
+
+  // Salva os limites de orçamento por categoria pro viajante atualmente
+  // selecionado no dropdown de "Total da viagem". Categorias deixadas em
+  // branco no formulário simplesmente não são tocadas (não apaga um limite
+  // já salvo por engano).
+  async function handleSaveBudgets(form) {
+    const rows = EXPENSE_CATEGORIES.filter((c) => form[`limit_${c}`]).map((c) => ({
+      trip_id: trip.id,
+      traveler_name: gastosUserFilter,
+      category: c,
+      limit_amount: Number(form[`limit_${c}`]),
+    }))
+    if (rows.length === 0) return
+    const { error } = await supabase
+      .from('trip_budgets')
+      .upsert(rows, { onConflict: 'trip_id,traveler_name,category' })
+    if (error) throw error
+    await refreshFinancials()
+  }
 
   // --- Aba "Detalhes": lembretes globais + notas por cidade --------------
 
@@ -2115,6 +2138,74 @@ function Dashboard({ session }) {
     [categoryTotals]
   )
 
+  // --- Controle de Orçamento -----------------------------------------------
+
+  const budgetsByUserCategory = useMemo(
+    () => Object.fromEntries(budgets.map((b) => [`${b.traveler_name}::${b.category}`, Number(b.limit_amount)])),
+    [budgets]
+  )
+
+  const hasBudgetForActiveUser = useMemo(
+    () => budgets.some((b) => b.traveler_name === gastosUserFilter),
+    [budgets, gastosUserFilter]
+  )
+
+  // Dias restantes de viagem: hoje até trips.end_date. Se a viagem ainda não
+  // começou, usa a duração inteira (start_date até end_date). Sem essas
+  // datas cadastradas, não dá pra calcular ritmo diário — devolve null.
+  const remainingTripDays = useMemo(() => {
+    if (!trip.end_date) return null
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const end = new Date(`${trip.end_date}T00:00:00`)
+    if (trip.start_date) {
+      const start = new Date(`${trip.start_date}T00:00:00`)
+      if (today < start) {
+        return Math.max(Math.round((end - start) / 86400000) + 1, 1)
+      }
+    }
+    return Math.max(Math.round((end - today) / 86400000) + 1, 1)
+  }, [trip.start_date, trip.end_date])
+
+  // Duração total da viagem em dias (pra média diária da pizza abaixo).
+  const tripDurationDays = useMemo(() => {
+    if (!trip.start_date || !trip.end_date) return null
+    const start = new Date(`${trip.start_date}T00:00:00`)
+    const end = new Date(`${trip.end_date}T00:00:00`)
+    return Math.max(Math.round((end - start) / 86400000) + 1, 1)
+  }, [trip.start_date, trip.end_date])
+
+  // Uma linha de métricas por categoria: gasto, limite, % consumido, cor do
+  // farol, quanto falta e o ritmo diário recalculado com base no que já foi
+  // gasto até agora.
+  const budgetProgress = useMemo(() => {
+    return categoryTotals.map(([cat, spent]) => {
+      const limit = budgetsByUserCategory[`${gastosUserFilter}::${cat}`] ?? null
+      const percent = limit ? Math.min((spent / limit) * 100, 999) : null
+      const totalRestante = limit != null ? limit - spent : null
+      const mediaRestante =
+        totalRestante != null && remainingTripDays ? totalRestante / remainingTripDays : null
+      let color = 'confirmado' // usa as mesmas cores do farol de status: verde
+      if (percent != null) {
+        if (percent > 95) color = 'atrasado' // vermelho
+        else if (percent >= 70) color = 'pendente' // amarelo
+      }
+      return { category: cat, spent, limit, percent, totalRestante, mediaRestante, color }
+    })
+  }, [categoryTotals, budgetsByUserCategory, gastosUserFilter, remainingTripDays])
+
+  // Pizza de média diária — só 3 categorias de gasto do dia a dia, sempre
+  // respeitando o mesmo usuário/status selecionados acima.
+  const DAILY_PIE_CATEGORIES = ['Alimentação', 'Compras', 'Passeio']
+  const DAILY_PIE_COLORS = { Alimentação: '#b85c38', Compras: '#8b9a7a', Passeio: '#37656e' }
+  const dailyPieData = useMemo(() => {
+    if (!tripDurationDays) return []
+    return DAILY_PIE_CATEGORIES.map((cat) => {
+      const spent = categoryTotals.find(([c]) => c === cat)?.[1] ?? 0
+      return { category: cat, dailyAverage: spent / tripDurationDays, color: DAILY_PIE_COLORS[cat] }
+    })
+  }, [categoryTotals, tripDurationDays])
+
   // "Cidade" não é um campo real de expenses_ledger — extrai de forma
   // aproximada o texto entre parênteses no fim da descrição (padrão que o
   // autocomplete de passeios já usa, ex: "Coliseu (Roma)"). É uma
@@ -2630,6 +2721,18 @@ function Dashboard({ session }) {
         {/* ================= TELA 3 — GASTOS ================= */}
         {view === 'gastos' && (
           <div className="flex flex-col gap-6">
+            {!hasBudgetForActiveUser && (
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => setBudgetSheetOpen(true)}
+                  className="rounded-full border border-dashed border-border bg-card px-3 py-1 font-mono text-[10px] uppercase tracking-wide text-muted-foreground"
+                >
+                  Configurar Orçamento
+                </button>
+              </div>
+            )}
+
             <section aria-labelledby="saldo-heading">
               <h2 id="saldo-heading" className="mb-2 flex items-center gap-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground">
                 <Wallet className="h-3.5 w-3.5" /> Saldo do grupo
@@ -2714,32 +2817,132 @@ function Dashboard({ session }) {
                 </label>
               </div>
 
-              <div className="mt-4 flex flex-col gap-2.5">
-                {categoryTotals.map(([cat, amount]) => (
-                  <button
-                    key={cat}
-                    type="button"
-                    onClick={() => openLedgerDrawer({ category: cat })}
-                    title={formatMoney(amount)}
-                    className="text-left"
-                  >
-                    <div className="mb-1 flex items-center justify-between font-mono text-[11px] text-foreground">
-                      <span>{cat}</span>
-                      <span className="text-muted-foreground">{formatMoney(amount)}</span>
-                    </div>
+              {/* Barras de orçamento por categoria — farol de cor conforme o
+                  % consumido do limite configurado pra pessoa selecionada
+                  acima. Categorias sem limite definido ficam num cinza neutro. */}
+              <div className="mt-4 flex flex-col gap-3">
+                {budgetProgress.map((row) => (
+                  <div key={row.category}>
+                    <button
+                      type="button"
+                      onClick={() => openLedgerDrawer({ category: row.category })}
+                      className="mb-1 flex w-full items-center justify-between font-mono text-[11px] text-foreground"
+                    >
+                      <span>{row.category}</span>
+                      <span className="text-muted-foreground">
+                        {formatMoney(row.spent)}
+                        {row.limit != null && ` / ${formatMoney(row.limit)}`}
+                      </span>
+                    </button>
                     <div className="h-2 overflow-hidden rounded-full bg-muted">
                       <div
-                        className="h-2 rounded-full bg-primary transition-all"
-                        style={{ width: `${(amount / maxCategoryAmount) * 100}%` }}
+                        className={`h-2 rounded-full transition-all ${
+                          row.limit == null
+                            ? 'bg-muted-foreground/40'
+                            : row.color === 'atrasado'
+                            ? 'bg-rosewood'
+                            : row.color === 'pendente'
+                            ? 'bg-accent'
+                            : 'bg-secondary'
+                        }`}
+                        style={{
+                          width: `${
+                            row.limit != null
+                              ? Math.min(row.percent, 100)
+                              : (row.spent / maxCategoryAmount) * 100
+                          }%`,
+                        }}
                       />
                     </div>
-                  </button>
+                    {row.limit != null ? (
+                      <div className="mt-1 flex items-center justify-between font-mono text-[10px] text-muted-foreground">
+                        <span>
+                          {row.percent.toFixed(0)}% consumido · falta {formatMoney(Math.max(row.totalRestante, 0))}
+                          {row.totalRestante < 0 && ' (estourado)'}
+                        </span>
+                        {row.mediaRestante != null && (
+                          <span className="shrink-0 pl-2 text-primary">
+                            {formatMoney(Math.max(row.mediaRestante, 0))}/dia restante
+                          </span>
+                        )}
+                      </div>
+                    ) : (
+                      <p className="mt-1 font-mono text-[10px] text-muted-foreground">Sem orçamento definido</p>
+                    )}
+                  </div>
                 ))}
               </div>
               <p className="mt-2 font-mono text-[10px] text-muted-foreground">
                 Toque numa categoria pra ver só os lançamentos dela.
               </p>
             </section>
+
+            <section aria-labelledby="pizza-heading">
+              <h2
+                id="pizza-heading"
+                className="mb-2 font-mono text-xs uppercase tracking-wide text-muted-foreground"
+              >
+                Média diária (Alimentação, Compras, Passeio)
+              </h2>
+              {!tripDurationDays ? (
+                <p className="rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
+                  Defina a data de início e término da viagem (na Tela de Início) pra ver a média diária.
+                </p>
+              ) : (
+                <div className="flex items-center gap-4">
+                  <div
+                    className="h-28 w-28 shrink-0 rounded-full"
+                    style={{
+                      background:
+                        dailyPieData.reduce((sum, d) => sum + d.dailyAverage, 0) > 0
+                          ? `conic-gradient(${(() => {
+                              const total = dailyPieData.reduce((sum, d) => sum + d.dailyAverage, 0) || 1
+                              let cumulative = 0
+                              return dailyPieData
+                                .map((d) => {
+                                  const start = (cumulative / total) * 360
+                                  cumulative += d.dailyAverage
+                                  const end = (cumulative / total) * 360
+                                  return `${d.color} ${start}deg ${end}deg`
+                                })
+                                .join(', ')
+                            })()})`
+                          : '#e2d9c3',
+                    }}
+                    aria-hidden="true"
+                  />
+                  <div className="flex flex-1 flex-col gap-1.5">
+                    {dailyPieData.map((d) => (
+                      <div key={d.category} className="flex items-center justify-between font-mono text-[11px]">
+                        <span className="flex items-center gap-1.5 text-foreground">
+                          <span
+                            className="h-2 w-2 shrink-0 rounded-full"
+                            style={{ backgroundColor: d.color }}
+                            aria-hidden="true"
+                          />
+                          {d.category}
+                        </span>
+                        <span className="text-muted-foreground">{formatMoney(d.dailyAverage)}/dia</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <p className="mt-2 font-mono text-[10px] text-muted-foreground">
+                Média = gasto da categoria ÷ {tripDurationDays ?? '—'} dias de viagem, respeitando o usuário e os
+                status marcados acima.
+              </p>
+            </section>
+
+            {hasBudgetForActiveUser && (
+              <button
+                type="button"
+                onClick={() => setBudgetSheetOpen(true)}
+                className="rounded-lg border border-border bg-card py-3 text-center font-mono text-xs uppercase tracking-wide text-foreground"
+              >
+                Editar Orçamento
+              </button>
+            )}
 
             <button
               type="button"
@@ -3361,6 +3564,28 @@ function Dashboard({ session }) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Configurar/editar limites de orçamento por categoria, pra pessoa
+          selecionada no dropdown de "Total da viagem". */}
+      {budgetSheetOpen && (
+        <QuickAddSheet
+          title={`Orçamento de ${gastosUserFilter}`}
+          icon={Wallet}
+          onClose={() => setBudgetSheetOpen(false)}
+          onSubmit={handleSaveBudgets}
+          initialValues={Object.fromEntries(
+            EXPENSE_CATEGORIES.map((c) => [
+              `limit_${c}`,
+              budgetsByUserCategory[`${gastosUserFilter}::${c}`] ?? '',
+            ])
+          )}
+          fields={EXPENSE_CATEGORIES.map((c) => ({
+            name: `limit_${c}`,
+            label: `Limite — ${c}`,
+            type: 'number',
+          }))}
+        />
       )}
 
       {/* Editar um lançamento (aberto a partir de um card do drawer acima) */}
