@@ -1191,10 +1191,11 @@ function Dashboard({ session }) {
     setOverviewAccommodations(accData)
     setOverviewActivities(actData)
     setOverviewTransport(transData)
+    const isPendingOrLate = (item) => item.status === 'pendente' || item.status === 'atrasado'
     setPendingCount(
-      accData.filter((a) => a.status === 'pendente').length +
-        actData.filter((a) => a.status === 'pendente').length +
-        transData.filter((t) => t.status === 'pendente').length
+      accData.filter(isPendingOrLate).length +
+        actData.filter(isPendingOrLate).length +
+        transData.filter(isPendingOrLate).length
     )
   }, [trip, destinations])
 
@@ -1983,23 +1984,32 @@ function Dashboard({ session }) {
     [trip?.currency, trip?.base_euro_rate]
   )
 
+  // Único ponto que decide se um item passa no filtro de status — inclui o
+  // valor combinado "pendente_atrasado" usado pelo atalho de pendências da
+  // tela Início.
+  function matchesStatusFilter(status) {
+    if (statusFilter === 'all') return true
+    if (statusFilter === 'pendente_atrasado') return status === 'pendente' || status === 'atrasado'
+    return status === statusFilter
+  }
+
   const filteredAccommodations = useMemo(() => {
     let list = accommodations
-    if (statusFilter !== 'all') list = list.filter((a) => a.status === statusFilter)
+    list = list.filter((a) => matchesStatusFilter(a.status))
     if (categoryFilter !== 'all' && categoryFilter !== 'accommodation') list = []
     return list
   }, [accommodations, statusFilter, categoryFilter])
 
   const filteredActivities = useMemo(() => {
     let list = activities
-    if (statusFilter !== 'all') list = list.filter((a) => a.status === statusFilter)
+    list = list.filter((a) => matchesStatusFilter(a.status))
     if (categoryFilter !== 'all' && categoryFilter !== 'activity') list = []
     return list
   }, [activities, statusFilter, categoryFilter])
 
   const filteredTransport = useMemo(() => {
     let list = transport
-    if (statusFilter !== 'all') list = list.filter((t) => t.status === statusFilter)
+    list = list.filter((t) => matchesStatusFilter(t.status))
     if (categoryFilter !== 'all' && categoryFilter !== 'transport') list = []
     return list
   }, [transport, statusFilter, categoryFilter])
@@ -2056,6 +2066,14 @@ function Dashboard({ session }) {
   function toggleExpandAll() {
     setExpandedDays(allDaysExpanded ? new Set() : new Set(allTimelineDates))
   }
+
+  // Sempre que a pessoa mexe em algum filtro do Roteiro (cidade, status ou
+  // categoria), expande todos os dias automaticamente — assim ela já vê
+  // direto o resultado, sem precisar abrir cada dia manualmente.
+  useEffect(() => {
+    setExpandedDays(new Set(allTimelineDates))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeDestId, statusFilter, categoryFilter])
 
   const urgentAlerts = useMemo(
     () => alertRows.filter((row) => (row.days_remaining ?? daysUntil(row.cancellation_deadline)) <= 7),
@@ -2350,6 +2368,7 @@ function Dashboard({ session }) {
               className="rounded-md border border-input bg-card px-2 py-1 font-mono text-[10px] text-foreground"
             >
               <option value="all">Status</option>
+              <option value="pendente_atrasado">Pendente + atrasado</option>
               {STATUS_ORDER.map((s) => (
                 <option
                   key={s}
@@ -2427,7 +2446,7 @@ function Dashboard({ session }) {
             <button
               onClick={() => {
                 setActiveDestId('ALL')
-                setStatusFilter('pendente')
+                setStatusFilter('pendente_atrasado')
                 setCategoryFilter('all')
                 setView('roteiro')
               }}
@@ -2558,9 +2577,11 @@ function Dashboard({ session }) {
                         isAccordion ? 'cursor-pointer' : 'cursor-default'
                       }`}
                     >
-                      <span className="text-[11px] font-semibold text-foreground">
-                        {date === 'Sem data' ? date : formatDate(date)}
-                        {contextLabel && ` · ${contextLabel}`}
+                      <span className="text-[11px] text-foreground">
+                        <span className="font-semibold">
+                          {date === 'Sem data' ? date : formatDate(date).replace(/\.$/, '')}
+                        </span>
+                        {contextLabel && <span className="font-normal"> · {contextLabel}</span>}
                       </span>
                       <span className="flex shrink-0 items-center gap-1 pl-2 text-[9px] font-normal text-muted-foreground/70">
                         {realItems.length} {realItems.length === 1 ? 'item' : 'itens'}
@@ -2788,7 +2809,7 @@ function Dashboard({ session }) {
                 <select
                   value={gastosUserFilter}
                   onChange={(e) => setGastosUserFilter(e.target.value)}
-                  className="rounded-md border border-input bg-card px-2 py-1 font-mono text-[10px] text-foreground"
+                  className="w-40 rounded-md border border-input bg-card px-2 py-1 font-mono text-[10px] text-foreground"
                 >
                   <option value="Todos">Todos</option>
                   {travelers.map((t) => (
@@ -2801,7 +2822,7 @@ function Dashboard({ session }) {
 
               <div className="flex items-center justify-between gap-3">
                 <p className="font-display text-4xl font-semibold text-foreground">{formatMoney(grandTotal)}</p>
-                <div className="flex flex-col gap-1">
+                <div className="flex w-40 flex-col gap-1">
                   <label className="flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground">
                     <input type="checkbox" checked readOnly className="accent-primary" />
                     Confirmado
