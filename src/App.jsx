@@ -2153,8 +2153,10 @@ function Dashboard({ session }) {
   // Dias restantes de viagem: hoje até trips.end_date. Se a viagem ainda não
   // começou, usa a duração inteira (start_date até end_date). Sem essas
   // datas cadastradas, não dá pra calcular ritmo diário — devolve null.
+  // (`trip?.` é essencial aqui: esses hooks rodam em todo render, inclusive
+  // antes da viagem carregar, quando `trip` ainda é null.)
   const remainingTripDays = useMemo(() => {
-    if (!trip.end_date) return null
+    if (!trip?.end_date) return null
     const today = new Date()
     today.setHours(0, 0, 0, 0)
     const end = new Date(`${trip.end_date}T00:00:00`)
@@ -2165,15 +2167,15 @@ function Dashboard({ session }) {
       }
     }
     return Math.max(Math.round((end - today) / 86400000) + 1, 1)
-  }, [trip.start_date, trip.end_date])
+  }, [trip?.start_date, trip?.end_date])
 
   // Duração total da viagem em dias (pra média diária da pizza abaixo).
   const tripDurationDays = useMemo(() => {
-    if (!trip.start_date || !trip.end_date) return null
+    if (!trip?.start_date || !trip?.end_date) return null
     const start = new Date(`${trip.start_date}T00:00:00`)
     const end = new Date(`${trip.end_date}T00:00:00`)
     return Math.max(Math.round((end - start) / 86400000) + 1, 1)
-  }, [trip.start_date, trip.end_date])
+  }, [trip?.start_date, trip?.end_date])
 
   // Uma linha de métricas por categoria: gasto, limite, % consumido, cor do
   // farol, quanto falta e o ritmo diário recalculado com base no que já foi
