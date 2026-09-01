@@ -94,6 +94,11 @@ const STATUS_CONFIG = {
 }
 const STATUS_ORDER = ['confirmado', 'pendente', 'atrasado', 'planejando']
 
+// Horário aproximado de cada turno, usado só pra ORDENAR a timeline — um
+// passeio marcado só com "Manhã" (sem horário exato) precisa aparecer antes
+// de um item às 16:30, por exemplo.
+const SHIFT_SORT_TIME = { Manhã: '08:00', Tarde: '13:00', Noite: '19:00' }
+
 // Cores sólidas (não dá pra usar opacidade/tailwind em <option>, precisa de
 // hex de verdade) usadas só no filtro de status da tela de Roteiro.
 const STATUS_OPTION_COLORS = {
@@ -1290,14 +1295,14 @@ function Dashboard({ session }) {
     refreshFinancials()
   }, [refreshFinancials])
 
-  // Salva os limites de orçamento por categoria pro viajante atualmente
-  // selecionado no dropdown de "Total da viagem". Categorias deixadas em
-  // branco no formulário simplesmente não são tocadas (não apaga um limite
-  // já salvo por engano).
+  // Salva os limites de orçamento por categoria pra pessoa LOGADA (não pro
+  // filtro de visualização de "Total da viagem" — orçamento é individual,
+  // cada um só mexe no seu). Categorias deixadas em branco no formulário
+  // simplesmente não são tocadas (não apaga um limite já salvo por engano).
   async function handleSaveBudgets(form) {
     const rows = EXPENSE_CATEGORIES.filter((c) => form[`limit_${c}`]).map((c) => ({
       trip_id: trip.id,
-      traveler_name: gastosUserFilter,
+      traveler_name: currentTravelerName,
       category: c,
       limit_amount: Number(form[`limit_${c}`]),
     }))
@@ -2175,9 +2180,12 @@ function Dashboard({ session }) {
     [budgets]
   )
 
-  const hasBudgetForActiveUser = useMemo(
-    () => budgets.some((b) => b.traveler_name === gastosUserFilter),
-    [budgets, gastosUserFilter]
+  // Orçamento é individual: cada pessoa só configura/edita o seu próprio,
+  // vinculado a quem está logado — não ao filtro de visualização de "Total
+  // da viagem" (que pode estar em "Todos" ou no nome de outra pessoa).
+  const hasBudgetForCurrentUser = useMemo(
+    () => budgets.some((b) => b.traveler_name === currentTravelerName),
+    [budgets, currentTravelerName]
   )
 
   // Dias restantes de viagem: hoje até trips.end_date. Se a viagem ainda não
@@ -2756,7 +2764,7 @@ function Dashboard({ session }) {
         {/* ================= TELA 3 — GASTOS ================= */}
         {view === 'gastos' && (
           <div className="flex flex-col gap-6">
-            {!hasBudgetForActiveUser && (
+            {!hasBudgetForCurrentUser && (
               <div className="flex justify-end">
                 <button
                   type="button"
@@ -2971,7 +2979,7 @@ function Dashboard({ session }) {
               </p>
             </section>
 
-            {hasBudgetForActiveUser && (
+            {hasBudgetForCurrentUser && (
               <button
                 type="button"
                 onClick={() => setBudgetSheetOpen(true)}
@@ -3607,14 +3615,14 @@ function Dashboard({ session }) {
           selecionada no dropdown de "Total da viagem". */}
       {budgetSheetOpen && (
         <QuickAddSheet
-          title={`Orçamento de ${gastosUserFilter}`}
+          title={`Orçamento de ${currentTravelerName}`}
           icon={Wallet}
           onClose={() => setBudgetSheetOpen(false)}
           onSubmit={handleSaveBudgets}
           initialValues={Object.fromEntries(
             EXPENSE_CATEGORIES.map((c) => [
               `limit_${c}`,
-              budgetsByUserCategory[`${gastosUserFilter}::${c}`] ?? '',
+              budgetsByUserCategory[`${currentTravelerName}::${c}`] ?? '',
             ])
           )}
           fields={EXPENSE_CATEGORIES.map((c) => ({
