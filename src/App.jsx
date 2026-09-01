@@ -2060,9 +2060,21 @@ function Dashboard({ session }) {
       .sort(([a], [b]) => (a === 'Sem data' ? 1 : b === 'Sem data' ? -1 : a.localeCompare(b)))
       .map(([date, items]) => ({
         date,
-        items: items.sort((a, b) => (a.time ?? '99:99').localeCompare(b.time ?? '99:99')),
+        items: items.sort((a, b) => (timelineSortKey(a) ?? '99:99').localeCompare(timelineSortKey(b) ?? '99:99')),
       }))
   }, [filteredAccommodations, filteredActivities, filteredTransport, destinations, activeDestId])
+
+  // Chave de ordenação de um item da timeline: usa o horário exato quando
+  // existe; se for um passeio só com "Turno" preenchido (sem horário), usa
+  // o horário aproximado daquele turno como respaldo, pra intercalar
+  // corretamente com itens que têm horário de verdade.
+  function timelineSortKey(item) {
+    if (item.time) return item.time
+    if (item.kind === 'activity' && item.data.shift && SHIFT_SORT_TIME[item.data.shift]) {
+      return SHIFT_SORT_TIME[item.data.shift]
+    }
+    return null
+  }
 
   // Usado pelo botão "Expandir tudo" no topo da tela Roteiro (só relevante
   // no modo accordion, ou seja, na Visão geral).
