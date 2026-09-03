@@ -1531,7 +1531,7 @@ function Dashboard({ session }) {
         assigned_date: form.assigned_date || null,
         shift: form.shift || null,
         exact_time: form.exact_time || null,
-        total_cost_eur: totalCost || null,
+        total_cost_eur: totalCost,
         paid_by: paidBy,
         split_type: splitType,
         status: form.status || 'planejando',
@@ -1578,7 +1578,7 @@ function Dashboard({ session }) {
         departure_date: form.departure_date || null,
         departure_time: form.departure_time || null,
         arrival_time: form.arrival_time || null,
-        total_cost_eur: totalCost || null,
+        total_cost_eur: totalCost,
         paid_by: paidBy,
         split_type: splitType,
         status: form.status || 'planejando',
@@ -1620,7 +1620,7 @@ function Dashboard({ session }) {
         hotel_name: form.hotel_name,
         check_in: form.check_in || null,
         check_out: form.check_out || null,
-        total_cost_eur: totalCost || null,
+        total_cost_eur: totalCost,
         paid_by: paidBy,
         split_type: splitType,
         status: form.status || 'planejando',
@@ -1720,7 +1720,7 @@ function Dashboard({ session }) {
         assigned_date: form.assigned_date || null,
         shift: form.shift || null,
         exact_time: form.exact_time || null,
-        total_cost_eur: totalCost || null,
+        total_cost_eur: totalCost,
         paid_by: paidBy,
         split_type: splitType,
         status: form.status || 'planejando',
@@ -1774,7 +1774,7 @@ function Dashboard({ session }) {
         departure_date: form.departure_date || null,
         departure_time: form.departure_time || null,
         arrival_time: form.arrival_time || null,
-        total_cost_eur: totalCost || null,
+        total_cost_eur: totalCost,
         paid_by: paidBy,
         split_type: splitType,
         status: form.status || 'planejando',
@@ -1822,7 +1822,7 @@ function Dashboard({ session }) {
         hotel_name: form.hotel_name,
         check_in: form.check_in || null,
         check_out: form.check_out || null,
-        total_cost_eur: totalCost || null,
+        total_cost_eur: totalCost,
         paid_by: paidBy,
         split_type: splitType,
         status: form.status || 'planejando',
@@ -2027,9 +2027,16 @@ function Dashboard({ session }) {
     const groups = {}
     for (const acc of filteredAccommodations) {
       if (!acc.check_in) continue
-      const key = acc.check_in
-      groups[key] = groups[key] ?? []
-      groups[key].push({ kind: 'accommodation', time: '00:00', data: acc })
+      const lastDate = acc.check_out || acc.check_in
+      for (const dateStr of generateDateRange(acc.check_in, lastDate)) {
+        groups[dateStr] = groups[dateStr] ?? []
+        groups[dateStr].push({
+          kind: 'accommodation',
+          time: '00:00',
+          data: acc,
+          isFirstNight: dateStr === acc.check_in,
+        })
+      }
     }
     for (const a of filteredActivities) {
       const key = a.assigned_date ?? 'Sem data'
@@ -2660,8 +2667,10 @@ function Dashboard({ session }) {
                                 : item.data.origin_station || item.data.destination_station
                               : null
 
+                          const isCompactAccommodation = isAccommodation && item.isFirstNight === false
+
                           return (
-                            <div key={`${item.kind}-${item.data.id ?? idx}`} className="flex items-stretch gap-2">
+                            <div key={`${item.kind}-${item.data.id ?? idx}-${idx}`} className="flex items-stretch gap-2">
                               {/* Trilho externo: ícone "nu" em Vintage Blue direto sobre o
                                   fundo Warm Cream, sem card/borda/fundo próprio, formando
                                   uma coluna contínua de diário de viagem. */}
@@ -2675,6 +2684,26 @@ function Dashboard({ session }) {
                                 )}
                               </div>
 
+                              {isCompactAccommodation ? (
+                                // A partir da 2ª diária, só um lembrete estreito com o nome
+                                // e "Como chegar" — pra consultar rápido durante a viagem
+                                // sem repetir todos os detalhes da hospedagem todo dia.
+                                <div className="flex flex-1 items-center justify-between gap-2 rounded-lg border border-border/60 bg-card/60 px-2 py-1">
+                                  <p className="font-mono text-xs text-foreground">{item.data.hotel_name}</p>
+                                  {mapsUrl && (
+                                    <a
+                                      href={mapsUrl}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      onClick={(e) => e.stopPropagation()}
+                                      className="inline-flex shrink-0 items-center gap-1 font-mono text-[10px] text-primary underline underline-offset-2"
+                                    >
+                                      <MapPin className="h-3 w-3 shrink-0" aria-hidden="true" />
+                                      Como chegar
+                                    </a>
+                                  )}
+                                </div>
+                              ) : (
                               <div
                                 className={`flex flex-1 items-start justify-between gap-2 rounded-xl border border-border bg-card ${
                                   isAccommodation ? 'p-2' : 'p-3'
@@ -2761,6 +2790,7 @@ function Dashboard({ session }) {
                                   </button>
                                 </div>
                               </div>
+                              )}
                             </div>
                           )
                         })}
