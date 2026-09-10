@@ -1480,11 +1480,17 @@ function Dashboard({ session }) {
 
   // Atualiza o status de uma linha (hospedagem, passeio ou transporte) ao
   // clicar no badge, e recarrega tudo que depende disso.
-  async function handleStatusChange(table, id, newStatus) {
+  async function handleStatusChange(table, id, newStatus, linkedExpenseId) {
     const { error } = await supabase.from(table).update({ status: newStatus }).eq('id', id)
     if (error) {
       setErrorMsg(error.message)
       return
+    }
+    // Propaga pro gasto vinculado também — sem isso, o extrato financeiro
+    // fica com o status antigo mesmo depois de mudar aqui na timeline.
+    if (linkedExpenseId) {
+      await supabase.from('expenses_ledger').update({ status: newStatus }).eq('id', linkedExpenseId)
+      await refreshFinancials()
     }
     await loadItineraryData(activeDestId)
     await loadPendingCount()
@@ -2777,7 +2783,8 @@ function Dashboard({ session }) {
                                           ? 'transport'
                                           : 'accommodations',
                                         item.data.id,
-                                        newStatus
+                                        newStatus,
+                                        item.data.linked_expense_id
                                       )
                                     }
                                   />
