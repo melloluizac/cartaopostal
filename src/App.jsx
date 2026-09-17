@@ -947,6 +947,7 @@ function Dashboard({ session }) {
   const [copyFailed, setCopyFailed] = useState(false)
   const [generatingCode, setGeneratingCode] = useState(false)
   const [cityNoteBannerOpen, setCityNoteBannerOpen] = useState(false)
+  const [completedRemindersOpen, setCompletedRemindersOpen] = useState(false)
 
   // Recolhe o banner de anotações sempre que troca de cidade, pra não
   // "vazar" a nota de uma cidade aberta sem querer pra outra.
@@ -2629,6 +2630,23 @@ function Dashboard({ session }) {
 
                     {isExpanded && (
                       <div className="flex flex-col gap-2">
+                        {activeDestId !== 'ALL' && cityNoteByDestId[activeDestId]?.notes_content && (
+                          <div className="flex items-stretch gap-2">
+                            <div className="flex w-5 shrink-0 flex-col items-center">
+                              <ClipboardList className="mt-1 h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
+                            </div>
+                            <div className="flex flex-1 items-center justify-between gap-2 rounded-lg border border-border/60 bg-card/60 px-2 py-1">
+                              <p className="font-mono text-xs text-foreground">Anotações</p>
+                              <button
+                                type="button"
+                                onClick={() => setCityNoteBannerOpen(true)}
+                                className="inline-flex shrink-0 items-center gap-1 font-mono text-[10px] text-primary underline underline-offset-2"
+                              >
+                                Ver todas
+                              </button>
+                            </div>
+                          </div>
+                        )}
                         {realItems.length === 0 && (
                           <p className="rounded-xl border border-dashed border-border p-3 text-center font-mono text-[11px] text-muted-foreground">
                             Nada planejado ainda pra este dia.
@@ -3084,33 +3102,75 @@ function Dashboard({ session }) {
                     Nenhum lembrete ainda.
                   </p>
                 )}
-                {reminders.map((r) => (
-                  <div
-                    key={r.id}
-                    className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2.5"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={r.is_completed}
-                      onChange={() => handleToggleReminder(r)}
-                      className="h-4 w-4 shrink-0 accent-primary"
-                    />
-                    <span
-                      className={`flex-1 font-mono text-sm ${
-                        r.is_completed ? 'text-muted-foreground line-through' : 'text-foreground'
-                      }`}
+                {reminders
+                  .filter((r) => !r.is_completed)
+                  .map((r) => (
+                    <div
+                      key={r.id}
+                      className="flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2.5"
                     >
-                      {r.task_text}
-                    </span>
+                      <input
+                        type="checkbox"
+                        checked={r.is_completed}
+                        onChange={() => handleToggleReminder(r)}
+                        className="h-4 w-4 shrink-0 accent-primary"
+                      />
+                      <span className="flex-1 font-mono text-sm text-foreground">{r.task_text}</span>
+                      <button
+                        onClick={() => handleDeleteReminder(r.id)}
+                        aria-label="Excluir lembrete"
+                        className="shrink-0 rounded-full p-1 text-muted-foreground hover:bg-muted"
+                      >
+                        <X className="h-3.5 w-3.5" aria-hidden="true" />
+                      </button>
+                    </div>
+                  ))}
+
+                {reminders.some((r) => r.is_completed) && (
+                  <div className="mt-1 overflow-hidden rounded-lg border border-border bg-card">
                     <button
-                      onClick={() => handleDeleteReminder(r.id)}
-                      aria-label="Excluir lembrete"
-                      className="shrink-0 rounded-full p-1 text-muted-foreground hover:bg-muted"
+                      type="button"
+                      onClick={() => setCompletedRemindersOpen((v) => !v)}
+                      className="flex w-full items-center justify-between px-3 py-2 font-mono text-[11px] uppercase tracking-wide text-muted-foreground"
                     >
-                      <X className="h-3.5 w-3.5" aria-hidden="true" />
+                      Ver concluídos
+                      {completedRemindersOpen ? (
+                        <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+                      ) : (
+                        <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+                      )}
                     </button>
+                    {completedRemindersOpen && (
+                      <div className="flex flex-col gap-1.5 border-t border-border p-2">
+                        {reminders
+                          .filter((r) => r.is_completed)
+                          .map((r) => (
+                            <div
+                              key={r.id}
+                              className="flex items-center gap-2 rounded-lg border border-border bg-background px-3 py-2.5"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={r.is_completed}
+                                onChange={() => handleToggleReminder(r)}
+                                className="h-4 w-4 shrink-0 accent-primary"
+                              />
+                              <span className="flex-1 font-mono text-sm text-muted-foreground line-through">
+                                {r.task_text}
+                              </span>
+                              <button
+                                onClick={() => handleDeleteReminder(r.id)}
+                                aria-label="Excluir lembrete"
+                                className="shrink-0 rounded-full p-1 text-muted-foreground hover:bg-muted"
+                              >
+                                <X className="h-3.5 w-3.5" aria-hidden="true" />
+                              </button>
+                            </div>
+                          ))}
+                      </div>
+                    )}
                   </div>
-                ))}
+                )}
               </div>
             </section>
 
