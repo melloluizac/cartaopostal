@@ -926,6 +926,7 @@ function Dashboard({ session }) {
   const [overviewAccommodations, setOverviewAccommodations] = useState([])
   const [overviewActivities, setOverviewActivities] = useState([])
   const [overviewTransport, setOverviewTransport] = useState([])
+  const [includeConfirmado, setIncludeConfirmado] = useState(true)
   const [includePendenteAtrasado, setIncludePendenteAtrasado] = useState(false)
   const [includePlanejando, setIncludePlanejando] = useState(false)
   const [gastosUserFilter, setGastosUserFilter] = useState('') // preenchido via effect abaixo
@@ -1942,6 +1943,24 @@ function Dashboard({ session }) {
     return ''
   }
 
+  // Todas as cidades relevantes pra um dia — mais de uma quando o dia é de
+  // deslocamento (ex: Lisboa ➔ Milão conta as duas). Usado pra decidir quais
+  // linhas compactas de "Anotações" aparecem naquele dia.
+  function dayCityDestIds(items) {
+    if (activeDestId !== 'ALL') return activeDestId ? [activeDestId] : []
+    const ids = new Set()
+    for (const item of items) {
+      if (item.data.destination_id) ids.add(item.data.destination_id)
+      if (item.kind === 'transport') {
+        const origin = destinations.find((d) => d.city_name === item.data.origin_city)
+        const dest = destinations.find((d) => d.city_name === item.data.destination_city)
+        if (origin) ids.add(origin.id)
+        if (dest) ids.add(dest.id)
+      }
+    }
+    return Array.from(ids)
+  }
+
   // Custo por pessoa exibido na timeline: se o item é "Individual", o valor
   // por pessoa é o próprio total (só a pessoa paga, por ela mesma). Se é
   // "igual" (um viajante específico foi escolhido como responsável), divide
@@ -2111,19 +2130,20 @@ function Dashboard({ session }) {
     [alertRows]
   )
 
-  // Estimativa de custo por status: "Confirmado" é sempre incluído; os
-  // outros dois grupos são opcionais via checkbox. Controla o Saldo do
-  // Grupo, o Total da viagem e o gráfico "Por categoria" — os três
-  // respeitam a mesma seleção de status.
+  // Estimativa de custo por status: os 3 grupos são independentes agora —
+  // "Confirmado" vem marcado por padrão, mas pode ser desmarcado como
+  // qualquer outro. Controla o Saldo do Grupo, o Total da viagem e o
+  // gráfico "Por categoria" — os três respeitam a mesma seleção.
   const estimateStatuses = useMemo(() => {
-    const set = new Set(['confirmado'])
+    const set = new Set()
+    if (includeConfirmado) set.add('confirmado')
     if (includePendenteAtrasado) {
       set.add('pendente')
       set.add('atrasado')
     }
     if (includePlanejando) set.add('planejando')
     return set
-  }, [includePendenteAtrasado, includePlanejando])
+  }, [includeConfirmado, includePendenteAtrasado, includePlanejando])
 
   const statusFilteredExpenses = useMemo(
     () => expenses.filter((e) => estimateStatuses.has(e.status ?? 'confirmado')),
@@ -2630,23 +2650,30 @@ function Dashboard({ session }) {
 
                     {isExpanded && (
                       <div className="flex flex-col gap-2">
-                        {activeDestId !== 'ALL' && cityNoteByDestId[activeDestId]?.notes_content && (
-                          <div className="flex items-stretch gap-2">
-                            <div className="flex w-5 shrink-0 flex-col items-center">
-                              <ClipboardList className="mt-1 h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
+                        {dayCityDestIds(items)
+                          .filter((destId) => cityNoteByDestId[destId]?.notes_content)
+                          .map((destId) => (
+                            <div key={`note-${destId}`} className="flex items-stretch gap-2">
+                              <div className="flex w-5 shrink-0 flex-col items-center">
+                                <ClipboardList className="mt-1 h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
+                              </div>
+                              <div className="flex flex-1 items-center justify-between gap-2 rounded-lg border border-border/60 bg-card/60 px-2 py-1">
+                                <p className="font-mono text-xs text-foreground">
+                                  Anotações{activeDestId === 'ALL' && destById[destId] ? ` — ${destById[destId]}` : ''}
+                                </p>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    if (activeDestId !== destId) setActiveDestId(destId)
+                                    setCityNoteBannerOpen(true)
+                                  }}
+                                  className="inline-flex shrink-0 items-center gap-1 font-mono text-[10px] text-primary underline underline-offset-2"
+                                >
+                                  Ver todas
+                                </button>
+                              </div>
                             </div>
-                            <div className="flex flex-1 items-center justify-between gap-2 rounded-lg border border-border/60 bg-card/60 px-2 py-1">
-                              <p className="font-mono text-xs text-foreground">Anotações</p>
-                              <button
-                                type="button"
-                                onClick={() => setCityNoteBannerOpen(true)}
-                                className="inline-flex shrink-0 items-center gap-1 font-mono text-[10px] text-primary underline underline-offset-2"
-                              >
-                                Ver todas
-                              </button>
-                            </div>
-                          </div>
-                        )}
+                          ))}
                         {realItems.length === 0 && (
                           <p className="rounded-xl border border-dashed border-border p-3 text-center font-mono text-[11px] text-muted-foreground">
                             Nada planejado ainda pra este dia.
@@ -2898,8 +2925,13 @@ function Dashboard({ session }) {
               <div className="flex items-center justify-between gap-3">
                 <p className="font-display text-4xl font-semibold text-foreground">{formatMoney(grandTotal)}</p>
                 <div className="flex w-40 flex-col gap-1">
-                  <label className="flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground">
-                    <input type="checkbox" checked readOnly className="accent-primary" />
+                  <label className="flex items-center gap-1.5 font-mono text-[10px] text-foreground">
+                    <input
+                      type="checkbox"
+                      checked={includeConfirmado}
+                      onChange={(e) => setIncludeConfirmado(e.target.checked)}
+                      className="accent-primary"
+                    />
                     Confirmado
                   </label>
                   <label className="flex items-center gap-1.5 font-mono text-[10px] text-foreground">
