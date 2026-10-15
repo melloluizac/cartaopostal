@@ -464,6 +464,22 @@ function QuickAddSheet({ title, icon: Icon, fields, initialValues, onSubmit, onD
   }
 
   function renderField(f) {
+    // Checkbox tem layout próprio (rótulo colado ao lado, fonte menor) — não
+    // usa a estrutura "rótulo em cima + campo embaixo" dos outros tipos.
+    if (f.type === 'checkbox') {
+      return (
+        <label className="flex items-center gap-2 font-mono text-[10px] text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={!!form[f.name]}
+            onChange={(e) => setField(f.name, e.target.checked)}
+            className="accent-primary"
+          />
+          {f.label}
+        </label>
+      )
+    }
+
     const matchingSuggestions =
       f.suggestions && form[f.name]
         ? f.suggestions.filter((s) => s.label.toLowerCase().includes(form[f.name].toLowerCase())).slice(0, 6)
@@ -935,6 +951,13 @@ function Dashboard({ session }) {
   const [ledgerDrawerOpen, setLedgerDrawerOpen] = useState(false)
   const [ledgerFilters, setLedgerFilters] = useState({ category: 'all', paidBy: 'all', city: 'all', status: 'all' })
   const [editingExpense, setEditingExpense] = useState(null)
+  const [syncPrompt, setSyncPrompt] = useState(null) // { resolve } | null
+
+  // Modal customizado substituindo window.confirm — devolve uma Promise
+  // que só resolve quando a pessoa clica num dos dois botões.
+  function askSyncChoice() {
+    return new Promise((resolve) => setSyncPrompt({ resolve }))
+  }
   const [loading, setLoading] = useState(true)
   const [openSheet, setOpenSheet] = useState(null) // 'activity' | 'transport' | 'expense' | null
   const [editingItem, setEditingItem] = useState(null) // { kind: 'activity' | 'transport', data: {...} } | null
@@ -1480,6 +1503,65 @@ function Dashboard({ session }) {
     return data.id
   }
 
+  // CONTEXTO A (formulários do Roteiro): quando "Individual" + "Aplicar
+  // custo a todos os viajantes" está marcado, cria uma cópia idêntica do
+  // gasto pra cada outro viajante — cada cópia continua "Individual"
+  // (privada), só que agora existe uma pra cada pessoa, vinculada de volta
+  // ao original via parent_id. Viajante sem conta vinculada (user_id nulo)
+  // não recebe cópia, já que não teria como enxergá-la depois.
+  async function duplicateExpenseForOthers({ originalExpenseId, paidBy, totalCost, date, description, category, status }) {
+    const others = travelers.filter((t) => t.name !== paidBy && t.user_id)
+    for (const other of others) {
+      await supabase.from('expenses_ledger').insert({
+        trip_id: trip.id,
+        transaction_date: date || todayIso(),
+        description,
+        category,
+        total_cost_eur: totalCost,
+        paid_by: other.name,
+        split_type: 'individual',
+        status: status || 'confirmado',
+        created_by: other.user_id,
+        parent_id: originalExpenseId,
+      })
+    }
+    if (others.length > 0) await refreshFinancials()
+  }
+
+  // Ao editar um item que tem uma cópia duplicada (ou é ele próprio a
+  // cópia), pergunta se a alteração deve valer pros dois lados ou só pro
+  // seu. Só dispara se título ou valor mudaram — trocar só a data/status
+  // não pede confirmação.
+  // As três operações abaixo passam por funções SQL (SECURITY DEFINER),
+  // porque a cópia do parceiro é "Individual" e a política de privacidade a
+  // esconde de quem editou — um select/update/delete direto não a enxergaria.
+  async function syncDuplicateOnEdit({ expenseId, totalCost, description, titleOrTotalChanged }) {
+    if (!titleOrTotalChanged) return
+    const { data: hasTwins } = await supabase.rpc('expense_has_twins', { p_expense_id: expenseId })
+    if (!hasTwins) return
+
+    const updateBoth = await askSyncChoice()
+    if (updateBoth) {
+      await supabase.rpc('update_expense_twins', {
+        p_expense_id: expenseId,
+        p_total: totalCost,
+        p_description: description,
+      })
+    } else {
+      await supabase.rpc('sever_expense_twins', { p_expense_id: expenseId })
+    }
+    await refreshFinancials()
+  }
+
+  // Trocou de "Individual" (com cópia) pra um viajante nomeado (divisão
+  // compartilhada)? A cópia do parceiro deixa de fazer sentido — apaga.
+  async function deleteDuplicatesIfTypeSwitched({ existingSplitType, newSplitType, linkedExpenseId }) {
+    if (existingSplitType === 'individual' && newSplitType !== 'individual' && linkedExpenseId) {
+      await supabase.rpc('delete_expense_twins', { p_expense_id: linkedExpenseId })
+      await refreshFinancials()
+    }
+  }
+
   // Atualiza o status de uma linha (hospedagem, passeio ou transporte) ao
   // clicar no badge, e recarrega tudo que depende disso.
   async function handleStatusChange(table, id, newStatus, linkedExpenseId) {
@@ -1564,6 +1646,17 @@ function Dashboard({ session }) {
       })
       if (expenseId) {
         await supabase.from('itinerary_activities').update({ linked_expense_id: expenseId }).eq('id', inserted.id)
+        if (splitType === 'individual' && form.apply_to_all !== false) {
+          await duplicateExpenseForOthers({
+            originalExpenseId: expenseId,
+            paidBy,
+            totalCost,
+            date: form.assigned_date,
+            description: `Passeio: ${form.activity_name}`,
+            category: 'Passeio',
+            status: form.status || 'planejando',
+          })
+        }
       }
     }
 
@@ -1609,6 +1702,17 @@ function Dashboard({ session }) {
       })
       if (expenseId) {
         await supabase.from('transport').update({ linked_expense_id: expenseId }).eq('id', inserted.id)
+        if (splitType === 'individual' && form.apply_to_all !== false) {
+          await duplicateExpenseForOthers({
+            originalExpenseId: expenseId,
+            paidBy,
+            totalCost,
+            date: form.departure_date,
+            description: `Transporte: ${form.origin_city} → ${form.destination_city}`,
+            category: 'Transporte',
+            status: form.status || 'planejando',
+          })
+        }
       }
     }
 
@@ -1653,6 +1757,17 @@ function Dashboard({ session }) {
       })
       if (expenseId) {
         await supabase.from('accommodations').update({ linked_expense_id: expenseId }).eq('id', inserted.id)
+        if (splitType === 'individual' && form.apply_to_all !== false) {
+          await duplicateExpenseForOthers({
+            originalExpenseId: expenseId,
+            paidBy,
+            totalCost,
+            date: form.check_in,
+            description: `Hospedagem: ${form.hotel_name}`,
+            category: 'Hospedagem',
+            status: form.status || 'planejando',
+          })
+        }
       }
     }
 
@@ -1753,6 +1868,21 @@ function Dashboard({ session }) {
       await supabase.from('itinerary_activities').update({ linked_expense_id: expenseId }).eq('id', existing.id)
     }
 
+    if (expenseId) {
+      await deleteDuplicatesIfTypeSwitched({
+        existingSplitType: existing.split_type,
+        newSplitType: splitType,
+        linkedExpenseId: expenseId,
+      })
+      await syncDuplicateOnEdit({
+        expenseId,
+        totalCost,
+        description: `Passeio: ${form.activity_name}`,
+        titleOrTotalChanged:
+          form.activity_name !== existing.activity_name || totalCost !== Number(existing.total_cost_eur ?? 0),
+      })
+    }
+
     await loadItineraryData(activeDestId)
     await loadPendingCount()
   }
@@ -1805,6 +1935,23 @@ function Dashboard({ session }) {
       await supabase.from('transport').update({ linked_expense_id: expenseId }).eq('id', existing.id)
     }
 
+    if (expenseId) {
+      await deleteDuplicatesIfTypeSwitched({
+        existingSplitType: existing.split_type,
+        newSplitType: splitType,
+        linkedExpenseId: expenseId,
+      })
+      await syncDuplicateOnEdit({
+        expenseId,
+        totalCost,
+        description: `Transporte: ${form.origin_city} → ${form.destination_city}`,
+        titleOrTotalChanged:
+          `${form.origin_city} → ${form.destination_city}` !==
+            `${existing.origin_city} → ${existing.destination_city}` ||
+          totalCost !== Number(existing.total_cost_eur ?? 0),
+      })
+    }
+
     await loadItineraryData(activeDestId)
     await loadPendingCount()
   }
@@ -1853,6 +2000,21 @@ function Dashboard({ session }) {
     })
     if (expenseId && expenseId !== existing.linked_expense_id) {
       await supabase.from('accommodations').update({ linked_expense_id: expenseId }).eq('id', existing.id)
+    }
+
+    if (expenseId) {
+      await deleteDuplicatesIfTypeSwitched({
+        existingSplitType: existing.split_type,
+        newSplitType: splitType,
+        linkedExpenseId: expenseId,
+      })
+      await syncDuplicateOnEdit({
+        expenseId,
+        totalCost,
+        description: `Hospedagem: ${form.hotel_name}`,
+        titleOrTotalChanged:
+          form.hotel_name !== existing.hotel_name || totalCost !== Number(existing.total_cost_eur ?? 0),
+      })
     }
 
     await loadItineraryData(activeDestId)
@@ -3363,6 +3525,13 @@ function Dashboard({ session }) {
               row: 'money',
               width: '2/3',
             },
+            {
+              name: 'apply_to_all',
+              label: 'Aplicar custo a todos os viajantes',
+              type: 'checkbox',
+              default: true,
+              hideWhen: (values) => values.responsavel !== 'individual',
+            },
             { name: 'booking_rule', label: 'Regra de compra' },
             { name: 'ticket_url', label: 'Link do ingresso', type: 'url' },
             { name: 'notes', label: 'Notas', type: 'textarea' },
@@ -3407,6 +3576,13 @@ function Dashboard({ session }) {
               default: 'individual',
               row: 'money',
               width: '2/3',
+            },
+            {
+              name: 'apply_to_all',
+              label: 'Aplicar custo a todos os viajantes',
+              type: 'checkbox',
+              default: true,
+              hideWhen: (values) => values.responsavel !== 'individual',
             },
             { name: 'comments', label: 'Comentários', type: 'textarea' },
           ]}
@@ -3455,6 +3631,13 @@ function Dashboard({ session }) {
               default: 'individual',
               row: 'money',
               width: '2/3',
+            },
+            {
+              name: 'apply_to_all',
+              label: 'Aplicar custo a todos os viajantes',
+              type: 'checkbox',
+              default: true,
+              hideWhen: (values) => values.responsavel !== 'individual',
             },
             { name: 'cancellation_deadline', label: 'Prazo de cancelamento', type: 'date' },
             { name: 'booking_link', label: 'Link da reserva', type: 'url' },
@@ -3772,6 +3955,41 @@ function Dashboard({ session }) {
             type: 'number',
           }))}
         />
+      )}
+
+      {/* Modal customizado: pergunta se a edição de um gasto compartilhado
+          deve valer pros dois lados ou só pro seu. */}
+      {syncPrompt && (
+        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-foreground/30 px-6 backdrop-blur-sm">
+          <div className="w-full max-w-xs rounded-2xl border border-border bg-card p-5 shadow-lg">
+            <p className="font-display text-lg font-semibold text-foreground">Gasto compartilhado</p>
+            <p className="mt-1 font-mono text-xs text-muted-foreground">
+              Este gasto está compartilhado com o parceiro. Quer atualizar o valor no lançamento dele também?
+            </p>
+            <div className="mt-4 flex flex-col gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  syncPrompt.resolve(true)
+                  setSyncPrompt(null)
+                }}
+                className="rounded-lg bg-primary px-4 py-2.5 font-mono text-sm font-medium text-primary-foreground"
+              >
+                Atualizar Ambos
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  syncPrompt.resolve(false)
+                  setSyncPrompt(null)
+                }}
+                className="rounded-lg border border-border bg-background px-4 py-2.5 font-mono text-sm text-foreground"
+              >
+                Apenas o meu
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Editar um lançamento (aberto a partir de um card do drawer acima) */}
