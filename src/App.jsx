@@ -1173,60 +1173,50 @@ function Dashboard({ session }) {
     }
   }
 
-  // Data de início da viagem: usa trip.start_date se a pessoa cadastrou na
-  // criação da viagem; senão, calcula como a menor data entre todas as
-  // hospedagens/passeios/transportes já cadastrados em qualquer cidade.
+  // Janela da viagem: trip.start_date/end_date se cadastradas; senão, a menor
+  // e a maior data entre tudo que existe no roteiro (hospedagens, passeios,
+  // transportes e datas das cidades).
+  const [routeRange, setRouteRange] = useState({ start: null, end: null })
   useEffect(() => {
     if (!trip) {
-      setTripStartDate(null)
-      return
-    }
-    if (trip.start_date) {
-      setTripStartDate(trip.start_date)
-      return
-    }
-    if (destinations.length === 0) {
-      setTripStartDate(null)
+      setRouteRange({ start: null, end: null })
       return
     }
     let ignore = false
-    async function loadEarliestDate() {
+    async function loadRouteRange() {
       const destIds = destinations.map((d) => d.id)
       const [accRes, actRes, transRes] = await Promise.all([
-        supabase
-          .from('accommodations')
-          .select('check_in')
-          .in('destination_id', destIds)
-          .not('check_in', 'is', null)
-          .order('check_in', { ascending: true })
-          .limit(1),
-        supabase
-          .from('itinerary_activities')
-          .select('assigned_date')
-          .in('destination_id', destIds)
-          .not('assigned_date', 'is', null)
-          .order('assigned_date', { ascending: true })
-          .limit(1),
-        supabase
-          .from('transport')
-          .select('departure_date')
-          .eq('trip_id', trip.id)
-          .not('departure_date', 'is', null)
-          .order('departure_date', { ascending: true })
-          .limit(1),
+        destIds.length
+          ? supabase.from('accommodations').select('check_in, check_out').in('destination_id', destIds)
+          : Promise.resolve({ data: [] }),
+        destIds.length
+          ? supabase.from('itinerary_activities').select('assigned_date').in('destination_id', destIds)
+          : Promise.resolve({ data: [] }),
+        supabase.from('transport').select('departure_date').eq('trip_id', trip.id),
       ])
-      const candidates = [
-        accRes.data?.[0]?.check_in,
-        actRes.data?.[0]?.assigned_date,
-        transRes.data?.[0]?.departure_date,
-      ].filter(Boolean)
-      if (!ignore) setTripStartDate(candidates.length ? candidates.sort()[0] : null)
+      const dates = [
+        ...(accRes.data ?? []).flatMap((r) => [r.check_in, r.check_out]),
+        ...(actRes.data ?? []).map((r) => r.assigned_date),
+        ...(transRes.data ?? []).map((r) => r.departure_date),
+        ...destinations.flatMap((d) => [d.arrival_date, d.departure_date]),
+      ]
+        .filter(Boolean)
+        .map((d) => String(d).slice(0, 10))
+        .sort()
+      if (!ignore) setRouteRange({ start: dates[0] ?? null, end: dates[dates.length - 1] ?? null })
     }
-    loadEarliestDate()
+    loadRouteRange()
     return () => {
       ignore = true
     }
-  }, [trip, destinations])
+  }, [trip, destinations, activities, accommodations, transport])
+
+  const effectiveStartDate = trip?.start_date || routeRange.start
+  const effectiveEndDate = trip?.end_date || routeRange.end
+
+  useEffect(() => {
+    setTripStartDate(effectiveStartDate ?? null)
+  }, [effectiveStartDate])
 
   // Busca hospedagens + passeios + transporte de TODAS as cidades (independente
   // do filtro da tela Roteiro), usado tanto pra contagem de pendências (tela
@@ -2526,26 +2516,26 @@ function Dashboard({ session }) {
   // (`trip?.` é essencial aqui: esses hooks rodam em todo render, inclusive
   // antes da viagem carregar, quando `trip` ainda é null.)
   const remainingTripDays = useMemo(() => {
-    if (!trip?.end_date) return null
+    if (!effectiveEndDate) return null
     const today = new Date()
     today.setHours(0, 0, 0, 0)
-    const end = new Date(`${trip.end_date}T00:00:00`)
-    if (trip.start_date) {
-      const start = new Date(`${trip.start_date}T00:00:00`)
+    const end = new Date(`${effectiveEndDate}T00:00:00`)
+    if (effectiveStartDate) {
+      const start = new Date(`${effectiveStartDate}T00:00:00`)
       if (today < start) {
         return Math.max(Math.round((end - start) / 86400000) + 1, 1)
       }
     }
     return Math.max(Math.round((end - today) / 86400000) + 1, 1)
-  }, [trip?.start_date, trip?.end_date])
+  }, [effectiveStartDate, effectiveEndDate])
 
   // Duração total da viagem em dias (pra média diária da pizza abaixo).
   const tripDurationDays = useMemo(() => {
-    if (!trip?.start_date || !trip?.end_date) return null
-    const start = new Date(`${trip.start_date}T00:00:00`)
-    const end = new Date(`${trip.end_date}T00:00:00`)
+    if (!effectiveStartDate || !effectiveEndDate) return null
+    const start = new Date(`${effectiveStartDate}T00:00:00`)
+    const end = new Date(`${effectiveEndDate}T00:00:00`)
     return Math.max(Math.round((end - start) / 86400000) + 1, 1)
-  }, [trip?.start_date, trip?.end_date])
+  }, [effectiveStartDate, effectiveEndDate])
 
   // Uma linha de métricas por categoria: gasto, limite, % consumido, cor do
   // farol, quanto falta e o ritmo diário recalculado com base no que já foi
@@ -2559,8 +2549,11 @@ function Dashboard({ session }) {
         totalRestante != null && remainingTripDays ? totalRestante / remainingTripDays : null
       let color = 'confirmado' // usa as mesmas cores do farol de status: verde
       if (percent != null) {
-        if (percent > 95) color = 'atrasado' // vermelho
-        else if (percent >= 70) color = 'pendente' // amarelo
+        // Vermelho só quando realmente estourou (>105%); laranja em escala
+        // de intensidade conforme se aproxima do limite.
+        if (percent > 105) color = 'atrasado' // vermelho
+        else if (percent >= 95) color = 'alerta' // laranja cheio
+        else if (percent >= 70) color = 'pendente' // laranja suave
       }
       return { category: cat, spent, limit, percent, totalRestante, mediaRestante, color }
     })
@@ -3277,8 +3270,10 @@ function Dashboard({ session }) {
                             ? 'bg-muted-foreground/40'
                             : row.color === 'atrasado'
                             ? 'bg-rosewood'
-                            : row.color === 'pendente'
+                            : row.color === 'alerta'
                             ? 'bg-accent'
+                            : row.color === 'pendente'
+                            ? 'bg-accent/60'
                             : 'bg-secondary'
                         }`}
                         style={{
@@ -3323,7 +3318,7 @@ function Dashboard({ session }) {
               </h2>
               {!tripDurationDays ? (
                 <p className="rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
-                  Defina a data de início e término da viagem (na Tela de Início) pra ver a média diária.
+                  Cadastre ao menos um item com data no Roteiro (ou defina início e término da viagem) pra ver a média diária.
                 </p>
               ) : (
                 <div className="flex items-center gap-4">
