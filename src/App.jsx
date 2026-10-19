@@ -952,6 +952,34 @@ function Dashboard({ session }) {
   const [ledgerFilters, setLedgerFilters] = useState({ category: 'all', paidBy: 'all', city: 'all', status: 'all' })
   const [editingExpense, setEditingExpense] = useState(null)
   const [syncPrompt, setSyncPrompt] = useState(null) // { resolve } | null
+  // Se o item/lançamento em edição já tem cópia pro parceiro. Vem do servidor
+  // (a cópia é invisível pra quem edita), então carrega ao abrir a edição.
+  const [editTwins, setEditTwins] = useState({ ready: false, has: false })
+
+  useEffect(() => {
+    if (!editingItem && !editingExpense) {
+      setEditTwins({ ready: false, has: false })
+      return
+    }
+    const expenseId = editingItem ? editingItem.data.linked_expense_id : editingExpense.id
+    if (!expenseId) {
+      setEditTwins({ ready: true, has: false })
+      return
+    }
+    let cancelled = false
+    setEditTwins({ ready: false, has: false })
+    supabase
+      .rpc('expense_has_twins', { p_expense_id: expenseId })
+      .then(({ data }) => {
+        if (!cancelled) setEditTwins({ ready: true, has: !!data })
+      })
+      .catch(() => {
+        if (!cancelled) setEditTwins({ ready: true, has: false })
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [editingItem, editingExpense])
 
   // Modal customizado substituindo window.confirm — devolve uma Promise
   // que só resolve quando a pessoa clica num dos dois botões.
@@ -1511,8 +1539,21 @@ function Dashboard({ session }) {
   // não recebe cópia, já que não teria como enxergá-la depois.
   async function duplicateExpenseForOthers({ originalExpenseId, paidBy, totalCost, date, description, category, status }) {
     const others = travelers.filter((t) => t.name !== paidBy && t.user_id)
+    const unlinked = travelers.filter((t) => t.name !== paidBy && !t.user_id)
+
+    // Antes isso falhava em silêncio. Agora avisa quando não dá pra replicar.
+    const warn = (msg) => {
+      setErrorMsg(msg)
+      setTimeout(() => setErrorMsg(null), 10000)
+    }
+    if (unlinked.length > 0) {
+      warn(
+        `Não deu pra replicar o gasto pra ${unlinked.map((t) => t.name).join(', ')}: a conta dessa pessoa ainda não está vinculada em trip_travelers (coluna user_id).`
+      )
+    }
+
     for (const other of others) {
-      await supabase.from('expenses_ledger').insert({
+      const { error } = await supabase.from('expenses_ledger').insert({
         trip_id: trip.id,
         transaction_date: date || todayIso(),
         description,
@@ -1524,8 +1565,51 @@ function Dashboard({ session }) {
         created_by: other.user_id,
         parent_id: originalExpenseId,
       })
+      if (error) {
+        warn(`Falha ao replicar o gasto pra ${other.name}: ${error.message}`)
+        return
+      }
     }
     if (others.length > 0) await refreshFinancials()
+  }
+
+  // Ao editar, decide o que fazer com a cópia do parceiro conforme o checkbox
+  // "Aplicar custo a todos os viajantes": criar se foi ligado, apagar se foi
+  // desligado, ou só sincronizar título/valor se continua ligado.
+  async function handleTwinsOnEdit({
+    expenseId,
+    existingSplitType,
+    splitType,
+    wantTwins,
+    hadTwins,
+    paidBy,
+    totalCost,
+    date,
+    description,
+    category,
+    status,
+    titleOrTotalChanged,
+  }) {
+    if (!expenseId) return
+    // Trocou de Individual pra divisão compartilhada: a cópia perde o sentido.
+    if (existingSplitType === 'individual' && splitType !== 'individual') {
+      await supabase.rpc('delete_expense_twins', { p_expense_id: expenseId })
+      await refreshFinancials()
+      return
+    }
+    if (splitType !== 'individual') return
+    if (!wantTwins) {
+      if (hadTwins) {
+        await supabase.rpc('delete_expense_twins', { p_expense_id: expenseId })
+        await refreshFinancials()
+      }
+      return
+    }
+    if (!hadTwins) {
+      await duplicateExpenseForOthers({ originalExpenseId: expenseId, paidBy, totalCost, date, description, category, status })
+      return
+    }
+    await syncDuplicateOnEdit({ expenseId, totalCost, description, titleOrTotalChanged })
   }
 
   // Ao editar um item que tem uma cópia duplicada (ou é ele próprio a
@@ -1801,10 +1885,11 @@ function Dashboard({ session }) {
   // gasto em si muda.
   async function handleUpdateExpense(id, form) {
     const { paidBy, splitType } = resolveResponsavel(form.responsavel)
+    const totalCost = form.total_cost_eur ? Number(form.total_cost_eur) : 0
     const { error } = await supabase
       .from('expenses_ledger')
       .update({
-        total_cost_eur: form.total_cost_eur ? Number(form.total_cost_eur) : 0,
+        total_cost_eur: totalCost,
         paid_by: paidBy,
         split_type: splitType,
         category: form.category || null,
@@ -1813,6 +1898,24 @@ function Dashboard({ session }) {
       })
       .eq('id', id)
     if (error) throw error
+
+    // Só o gasto "original" (sem parent_id) controla a cópia do parceiro.
+    if (editingExpense && !editingExpense.parent_id) {
+      await handleTwinsOnEdit({
+        expenseId: id,
+        existingSplitType: editingExpense.split_type,
+        splitType,
+        wantTwins: !!form.apply_to_all,
+        hadTwins: editTwins.has,
+        paidBy,
+        totalCost,
+        date: editingExpense.transaction_date,
+        description: editingExpense.description,
+        category: form.category || editingExpense.category,
+        status: form.status || 'confirmado',
+        titleOrTotalChanged: totalCost !== Number(editingExpense.total_cost_eur ?? 0),
+      })
+    }
     await refreshFinancials()
   }
 
@@ -1869,15 +1972,18 @@ function Dashboard({ session }) {
     }
 
     if (expenseId) {
-      await deleteDuplicatesIfTypeSwitched({
-        existingSplitType: existing.split_type,
-        newSplitType: splitType,
-        linkedExpenseId: expenseId,
-      })
-      await syncDuplicateOnEdit({
+      await handleTwinsOnEdit({
         expenseId,
+        existingSplitType: existing.split_type,
+        splitType,
+        wantTwins: !!form.apply_to_all,
+        hadTwins: editTwins.has,
+        paidBy,
         totalCost,
+        date: form.assigned_date,
         description: `Passeio: ${form.activity_name}`,
+        category: 'Passeio',
+        status: form.status || 'planejando',
         titleOrTotalChanged:
           form.activity_name !== existing.activity_name || totalCost !== Number(existing.total_cost_eur ?? 0),
       })
@@ -1891,6 +1997,7 @@ function Dashboard({ session }) {
     const { error } = await supabase.from('itinerary_activities').delete().eq('id', existing.id)
     if (error) throw error
     if (existing.linked_expense_id) {
+      await supabase.rpc('delete_expense_twins', { p_expense_id: existing.linked_expense_id })
       await supabase.from('expenses_ledger').delete().eq('id', existing.linked_expense_id)
       await refreshFinancials()
     }
@@ -1936,15 +2043,18 @@ function Dashboard({ session }) {
     }
 
     if (expenseId) {
-      await deleteDuplicatesIfTypeSwitched({
-        existingSplitType: existing.split_type,
-        newSplitType: splitType,
-        linkedExpenseId: expenseId,
-      })
-      await syncDuplicateOnEdit({
+      await handleTwinsOnEdit({
         expenseId,
+        existingSplitType: existing.split_type,
+        splitType,
+        wantTwins: !!form.apply_to_all,
+        hadTwins: editTwins.has,
+        paidBy,
         totalCost,
+        date: form.departure_date,
         description: `Transporte: ${form.origin_city} → ${form.destination_city}`,
+        category: 'Transporte',
+        status: form.status || 'planejando',
         titleOrTotalChanged:
           `${form.origin_city} → ${form.destination_city}` !==
             `${existing.origin_city} → ${existing.destination_city}` ||
@@ -1960,6 +2070,7 @@ function Dashboard({ session }) {
     const { error } = await supabase.from('transport').delete().eq('id', existing.id)
     if (error) throw error
     if (existing.linked_expense_id) {
+      await supabase.rpc('delete_expense_twins', { p_expense_id: existing.linked_expense_id })
       await supabase.from('expenses_ledger').delete().eq('id', existing.linked_expense_id)
       await refreshFinancials()
     }
@@ -2003,15 +2114,18 @@ function Dashboard({ session }) {
     }
 
     if (expenseId) {
-      await deleteDuplicatesIfTypeSwitched({
-        existingSplitType: existing.split_type,
-        newSplitType: splitType,
-        linkedExpenseId: expenseId,
-      })
-      await syncDuplicateOnEdit({
+      await handleTwinsOnEdit({
         expenseId,
+        existingSplitType: existing.split_type,
+        splitType,
+        wantTwins: !!form.apply_to_all,
+        hadTwins: editTwins.has,
+        paidBy,
         totalCost,
+        date: form.check_in,
         description: `Hospedagem: ${form.hotel_name}`,
+        category: 'Hospedagem',
+        status: form.status || 'planejando',
         titleOrTotalChanged:
           form.hotel_name !== existing.hotel_name || totalCost !== Number(existing.total_cost_eur ?? 0),
       })
@@ -2025,6 +2139,7 @@ function Dashboard({ session }) {
     const { error } = await supabase.from('accommodations').delete().eq('id', existing.id)
     if (error) throw error
     if (existing.linked_expense_id) {
+      await supabase.rpc('delete_expense_twins', { p_expense_id: existing.linked_expense_id })
       await supabase.from('expenses_ledger').delete().eq('id', existing.linked_expense_id)
       await refreshFinancials()
     }
@@ -3649,12 +3764,14 @@ function Dashboard({ session }) {
       {/* Sheets de edição (abrem ao clicar no lápis de um item da timeline) */}
       {editingItem?.kind === 'activity' && (
         <QuickAddSheet
+          key={`edit-${editingItem.data.id}-${editTwins.ready}`}
           title="Editar passeio"
           icon={Ticket}
           onClose={() => setEditingItem(null)}
           initialValues={{
             ...editingItem.data,
             responsavel: editingItem.data.split_type === 'igual' ? editingItem.data.paid_by : 'individual',
+            apply_to_all: editTwins.has,
           }}
           onSubmit={(form) => handleUpdateActivity(editingItem.data, form)}
           onDelete={() => handleDeleteActivity(editingItem.data)}
@@ -3697,6 +3814,12 @@ function Dashboard({ session }) {
               row: 'money',
               width: '2/3',
             },
+            {
+              name: 'apply_to_all',
+              label: 'Aplicar custo a todos os viajantes',
+              type: 'checkbox',
+              hideWhen: (values) => values.responsavel !== 'individual',
+            },
             { name: 'booking_rule', label: 'Regra de compra' },
             { name: 'ticket_url', label: 'Link do ingresso', type: 'url' },
             { name: 'notes', label: 'Notas', type: 'textarea' },
@@ -3706,12 +3829,14 @@ function Dashboard({ session }) {
 
       {editingItem?.kind === 'transport' && (
         <QuickAddSheet
+          key={`edit-${editingItem.data.id}-${editTwins.ready}`}
           title="Editar transporte"
           icon={Plane}
           onClose={() => setEditingItem(null)}
           initialValues={{
             ...editingItem.data,
             responsavel: editingItem.data.split_type === 'igual' ? editingItem.data.paid_by : 'individual',
+            apply_to_all: editTwins.has,
           }}
           onSubmit={(form) => handleUpdateTransport(editingItem.data, form)}
           onDelete={() => handleDeleteTransport(editingItem.data)}
@@ -3740,6 +3865,12 @@ function Dashboard({ session }) {
               row: 'money',
               width: '2/3',
             },
+            {
+              name: 'apply_to_all',
+              label: 'Aplicar custo a todos os viajantes',
+              type: 'checkbox',
+              hideWhen: (values) => values.responsavel !== 'individual',
+            },
             { name: 'comments', label: 'Comentários', type: 'textarea' },
           ]}
         />
@@ -3747,12 +3878,14 @@ function Dashboard({ session }) {
 
       {editingItem?.kind === 'accommodation' && (
         <QuickAddSheet
+          key={`edit-${editingItem.data.id}-${editTwins.ready}`}
           title="Editar hospedagem"
           icon={Hotel}
           onClose={() => setEditingItem(null)}
           initialValues={{
             ...editingItem.data,
             responsavel: editingItem.data.split_type === 'igual' ? editingItem.data.paid_by : 'individual',
+            apply_to_all: editTwins.has,
           }}
           onSubmit={(form) => handleUpdateAccommodation(editingItem.data, form)}
           onDelete={() => handleDeleteAccommodation(editingItem.data)}
@@ -3787,6 +3920,12 @@ function Dashboard({ session }) {
               default: 'individual',
               row: 'money',
               width: '2/3',
+            },
+            {
+              name: 'apply_to_all',
+              label: 'Aplicar custo a todos os viajantes',
+              type: 'checkbox',
+              hideWhen: (values) => values.responsavel !== 'individual',
             },
             { name: 'cancellation_deadline', label: 'Prazo de cancelamento', type: 'date' },
             { name: 'booking_link', label: 'Link da reserva', type: 'url' },
@@ -3995,6 +4134,7 @@ function Dashboard({ session }) {
       {/* Editar um lançamento (aberto a partir de um card do drawer acima) */}
       {editingExpense && (
         <QuickAddSheet
+          key={`exp-${editingExpense.id}-${editTwins.ready}`}
           title="Editar lançamento"
           icon={Wallet}
           onClose={() => setEditingExpense(null)}
@@ -4002,6 +4142,7 @@ function Dashboard({ session }) {
             ...editingExpense,
             responsavel: editingExpense.split_type === 'igual' ? editingExpense.paid_by : 'individual',
             status: editingExpense.status ?? 'confirmado',
+            apply_to_all: editTwins.has,
           }}
           onSubmit={(form) => handleUpdateExpense(editingExpense.id, form)}
           onDelete={() => handleDeleteExpense(editingExpense.id)}
@@ -4015,6 +4156,12 @@ function Dashboard({ session }) {
               default: 'individual',
               row: 'money',
               width: '2/3',
+            },
+            {
+              name: 'apply_to_all',
+              label: 'Aplicar custo a todos os viajantes',
+              type: 'checkbox',
+              hideWhen: (values) => values.responsavel !== 'individual' || !!editingExpense.parent_id,
             },
             { name: 'category', label: 'Categoria', type: 'select', options: EXPENSE_CATEGORIES },
             {
