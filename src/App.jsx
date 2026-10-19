@@ -1879,13 +1879,30 @@ function Dashboard({ session }) {
   // gasto for vinculado a um passeio/transporte/hospedagem (linked_expense_id
   // aponta pra cá), o item de origem continua com seus próprios dados — só o
   // gasto em si muda.
+  // Descrições de itens do roteiro vêm como "Passeio: Parque Guell". O prefixo
+  // é a categoria, que tem campo próprio — então a edição mostra só o nome.
+  function splitCategoryPrefix(description) {
+    const m = (description ?? '').match(new RegExp(`^(${EXPENSE_CATEGORIES.join('|')}): (.*)$`))
+    return m ? { prefixed: true, name: m[2] } : { prefixed: false, name: description ?? '' }
+  }
+
   async function handleUpdateExpense(id, form) {
+    const { prefixed } = splitCategoryPrefix(editingExpense?.description)
+    const newName = (form.description || '').trim()
+    const newCategory = form.category || editingExpense?.category || null
+    const fullDescription = newName
+      ? prefixed && newCategory
+        ? `${newCategory}: ${newName}`
+        : newName
+      : editingExpense?.description
+    const newDate = form.transaction_date || editingExpense?.transaction_date
     const { paidBy, splitType } = resolveResponsavel(form.responsavel)
     const totalCost = form.total_cost_eur ? Number(form.total_cost_eur) : 0
     const { error } = await supabase
       .from('expenses_ledger')
       .update({
-        description: (form.description || '').trim() || editingExpense?.description,
+        description: fullDescription,
+        transaction_date: newDate,
         total_cost_eur: totalCost,
         paid_by: paidBy,
         split_type: splitType,
@@ -1906,13 +1923,13 @@ function Dashboard({ session }) {
         hadTwins: editTwins.has,
         paidBy,
         totalCost,
-        date: editingExpense.transaction_date,
-        description: (form.description || '').trim() || editingExpense.description,
+        date: newDate,
+        description: fullDescription,
         category: form.category || editingExpense.category,
         status: form.status || 'confirmado',
         titleOrTotalChanged:
           totalCost !== Number(editingExpense.total_cost_eur ?? 0) ||
-          ((form.description || '').trim() || editingExpense.description) !== editingExpense.description,
+          fullDescription !== editingExpense.description,
       })
     }
     await refreshFinancials()
@@ -2537,6 +2554,15 @@ function Dashboard({ session }) {
     return Math.max(Math.round((end - start) / 86400000) + 1, 1)
   }, [effectiveStartDate, effectiveEndDate])
 
+  // Orçamento total da pessoa selecionada = soma dos limites de todas as
+  // categorias que têm limite. null se não há nenhum (ou se está em "Todos").
+  const totalBudget = useMemo(() => {
+    const limits = EXPENSE_CATEGORIES.map((c) => budgetsByUserCategory[`${gastosUserFilter}::${c}`]).filter(
+      (v) => v != null
+    )
+    return limits.length ? limits.reduce((a, b) => a + b, 0) : null
+  }, [budgetsByUserCategory, gastosUserFilter])
+
   // Dias já decorridos da viagem (0 se ainda não começou), limitado à duração.
   const elapsedTripDays = useMemo(() => {
     if (!effectiveStartDate || !tripDurationDays) return null
@@ -2814,7 +2840,7 @@ function Dashboard({ session }) {
             )}
 
             {urgentAlerts.length > 0 && (
-              <div className="flex w-full flex-col gap-2 text-left">
+              <div className="flex w-full flex-col gap-1.5 text-left">
                 <h2 className="flex items-center gap-1.5 font-mono text-xs uppercase tracking-wide text-rosewood">
                   <AlertTriangle className="h-3.5 w-3.5" /> Cancelamento próximo
                 </h2>
@@ -2823,13 +2849,13 @@ function Dashboard({ session }) {
                   return (
                     <div
                       key={row.accommodation_id ?? i}
-                      className="flex items-center justify-between rounded-xl border border-accent/40 bg-accent/10 px-3 py-2.5"
+                      className="flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/10 px-3 py-2.5"
                     >
-                      <div>
-                        <p className="font-medium text-foreground">{row.hotel_name}</p>
-                        <p className="font-mono text-[11px] text-muted-foreground">{row.city_name}</p>
-                      </div>
-                      <span className="font-mono text-xs font-semibold text-accent">
+                      <p className="min-w-0 flex-1 truncate font-mono text-sm text-foreground">
+                        {row.hotel_name}
+                        <span className="text-[11px] text-muted-foreground"> · {row.city_name}</span>
+                      </p>
+                      <span className="shrink-0 font-mono text-[11px] font-semibold text-accent">
                         {days <= 0 ? 'vence hoje' : `${days}d restantes`}
                       </span>
                     </div>
@@ -3208,7 +3234,21 @@ function Dashboard({ session }) {
               </div>
 
               <div className="flex items-center justify-between gap-3">
-                <p className="font-display text-4xl font-semibold text-foreground">{formatMoney(grandTotal)}</p>
+                <div>
+                  <p className="flex flex-wrap items-baseline gap-x-1.5">
+                    <span className="font-display text-4xl font-semibold text-foreground">{formatMoney(grandTotal)}</span>
+                    {totalBudget != null && (
+                      <span className="font-mono text-[11px] text-muted-foreground">/ {formatMoney(totalBudget)}</span>
+                    )}
+                  </p>
+                  {totalBudget != null && (
+                    <p className="mt-1 font-mono text-[10px] text-muted-foreground">
+                      {((grandTotal / totalBudget) * 100).toFixed(0)}% consumido · falta{' '}
+                      {formatMoney(Math.max(totalBudget - grandTotal, 0))}
+                      {grandTotal > totalBudget && ' (estourado)'}
+                    </p>
+                  )}
+                </div>
                 <div className="flex w-40 flex-col gap-1">
                   <label className="flex items-center gap-1.5 font-mono text-[10px] text-foreground">
                     <input
@@ -3243,17 +3283,15 @@ function Dashboard({ session }) {
               {/* Barras de orçamento por categoria — farol de cor conforme o
                   % consumido do limite configurado pra pessoa selecionada
                   acima. Categorias sem limite definido ficam num cinza neutro. */}
-              {tripDurationDays ? (
+              {tripDurationDays && elapsedTripDays > 0 ? (
                 <p className="mt-3 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
-                  {elapsedTripDays > 0
-                    ? `Dia ${elapsedTripDays} de ${tripDurationDays} · faltam ${remainingTripDays ?? 0} dias`
-                    : `A viagem começa em breve · ${tripDurationDays} dias`}
+                  {`Dia ${elapsedTripDays} de ${tripDurationDays} · faltam ${remainingTripDays ?? 0} dias`}
                 </p>
-              ) : (
+              ) : !tripDurationDays ? (
                 <p className="mt-3 rounded-xl border border-dashed border-border p-3 text-center font-mono text-[10px] text-muted-foreground">
                   Cadastre itens com data no Roteiro (ou defina início e término) pra ver as médias diárias.
                 </p>
-              )}
+              ) : null}
               <div className="mt-2 flex flex-col gap-3">
                 {budgetProgress.map((row) => {
                   const CategoryIcon = CATEGORY_ICONS[row.category]
@@ -4116,6 +4154,7 @@ function Dashboard({ session }) {
           onClose={() => setEditingExpense(null)}
           initialValues={{
             ...editingExpense,
+            description: splitCategoryPrefix(editingExpense.description).name,
             responsavel: editingExpense.split_type === 'igual' ? editingExpense.paid_by : 'individual',
             status: editingExpense.status ?? 'confirmado',
             apply_to_all: editTwins.has,
@@ -4124,6 +4163,7 @@ function Dashboard({ session }) {
           onDelete={() => handleDeleteExpense(editingExpense.id)}
           fields={[
             { name: 'description', label: 'Nome', required: true },
+            { name: 'transaction_date', label: 'Data', type: 'date' },
             { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
             {
               name: 'responsavel',
