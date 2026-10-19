@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { Loader2, RefreshCw, Plane } from 'lucide-react'
+import { Loader2, RefreshCw, Plane, Droplets, Thermometer } from 'lucide-react'
 
 // ---------------------------------------------------------------------------
 // Aba "Clima" — regras em "Regras do Clima do Roteiro":
@@ -391,8 +391,14 @@ function diffReading(prev, cur) {
 const CONF_DOT = {
   alta: { background: '#5f8a4f', border: '1px solid #5f8a4f' },
   media: { background: '#d9a521', border: '1px solid #d9a521' },
-  baixa: { background: 'transparent', border: '1.5px solid #6f6350' },
-  reserva: { background: 'transparent', border: '1.5px dashed #9a9080' },
+  // tendência: laranja cheio · média histórica: laranja pontilhado
+  baixa: { background: '#c8641e', border: '1px solid #c8641e' },
+  reserva: {
+    backgroundColor: 'transparent',
+    backgroundImage: 'radial-gradient(#c8641e 0.9px, transparent 1.1px)',
+    backgroundSize: '3px 3px',
+    border: '1px solid #c8641e',
+  },
 }
 const CONF_TEXT = {
   alta: 'confiança alta (previsão diária, até 7 dias)',
@@ -410,12 +416,6 @@ function rainStyle(prob, src) {
   } else if (prob >= 50) background = '#9fbfc5'
   else if (prob >= 20) background = '#dce8ea'
   const style = { backgroundColor: background, color }
-  if (src === 'trend') {
-    style.backgroundImage = 'radial-gradient(rgba(59,42,34,0.18) 1px, transparent 1px)'
-    style.backgroundSize = '5px 5px'
-  } else if (src === 'hist') {
-    style.backgroundImage = 'repeating-linear-gradient(135deg, rgba(59,42,34,0.12) 0 2px, transparent 2px 6px)'
-  }
   return style
 }
 
@@ -744,13 +744,17 @@ export default function WeatherTab({ destinations, accommodations, activities, t
                                 <>
                                   <span className="mt-0.5 flex items-center justify-between text-[10px]">
                                     <span>{w.icon}</span>
-                                    <span>{w.prob}%</span>
+                                    <span className="flex items-center gap-0.5">
+                                      <Droplets className="h-2.5 w-2.5 opacity-60" aria-hidden="true" />
+                                      {w.prob}%
+                                    </span>
                                   </span>
-                                  <span className="flex items-center justify-between text-[10px]">
+                                  <span className="flex items-center justify-between gap-0.5 text-[10px]">
                                     <span style={{ color: w.prob >= 70 ? '#bfe0e6' : '#2f6fa8' }}>
                                       {w.src === 'prev' ? '' : '~'}
                                       {w.min}°
                                     </span>
+                                    <Thermometer className="h-2.5 w-2.5 shrink-0 opacity-50" aria-hidden="true" />
                                     <span style={{ color: w.prob >= 70 ? '#ffd2c4' : '#b3402a' }}>
                                       {w.src === 'prev' ? '' : '~'}
                                       {w.max}°
