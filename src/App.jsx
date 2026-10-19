@@ -1178,40 +1178,19 @@ function Dashboard({ session }) {
   // Janela da viagem: trip.start_date/end_date se cadastradas; senão, a menor
   // e a maior data entre tudo que existe no roteiro (hospedagens, passeios,
   // transportes e datas das cidades).
-  const [routeRange, setRouteRange] = useState({ start: null, end: null })
-  useEffect(() => {
-    if (!trip) {
-      setRouteRange({ start: null, end: null })
-      return
-    }
-    let ignore = false
-    async function loadRouteRange() {
-      const destIds = destinations.map((d) => d.id)
-      const [accRes, actRes, transRes] = await Promise.all([
-        destIds.length
-          ? supabase.from('accommodations').select('check_in, check_out').in('destination_id', destIds)
-          : Promise.resolve({ data: [] }),
-        destIds.length
-          ? supabase.from('itinerary_activities').select('assigned_date').in('destination_id', destIds)
-          : Promise.resolve({ data: [] }),
-        supabase.from('transport').select('departure_date').eq('trip_id', trip.id),
-      ])
-      const dates = [
-        ...(accRes.data ?? []).flatMap((r) => [r.check_in, r.check_out]),
-        ...(actRes.data ?? []).map((r) => r.assigned_date),
-        ...(transRes.data ?? []).map((r) => r.departure_date),
-        ...destinations.flatMap((d) => [d.arrival_date, d.departure_date]),
-      ]
-        .filter(Boolean)
-        .map((d) => String(d).slice(0, 10))
-        .sort()
-      if (!ignore) setRouteRange({ start: dates[0] ?? null, end: dates[dates.length - 1] ?? null })
-    }
-    loadRouteRange()
-    return () => {
-      ignore = true
-    }
-  }, [trip, destinations, activities, accommodations, transport])
+  // Calculado com os dados que a tela já carregou (sem consultas extras).
+  const routeRange = useMemo(() => {
+    const dates = [
+      ...overviewAccommodations.flatMap((r) => [r.check_in, r.check_out]),
+      ...overviewActivities.map((r) => r.assigned_date),
+      ...overviewTransport.map((r) => r.departure_date),
+      ...destinations.flatMap((d) => [d.arrival_date, d.departure_date]),
+    ]
+      .filter(Boolean)
+      .map((d) => String(d).slice(0, 10))
+      .sort()
+    return { start: dates[0] ?? null, end: dates[dates.length - 1] ?? null }
+  }, [overviewAccommodations, overviewActivities, overviewTransport, destinations])
 
   const effectiveStartDate = trip?.start_date || routeRange.start
   const effectiveEndDate = trip?.end_date || routeRange.end
