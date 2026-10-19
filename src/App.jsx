@@ -1147,8 +1147,9 @@ function Dashboard({ session }) {
   // soubermos quem ele é — só na primeira vez (não sobrescreve se a pessoa
   // já trocou manualmente pra "Todos" ou outro nome).
   useEffect(() => {
-    if (!gastosUserFilter && currentTravelerName) setGastosUserFilter(currentTravelerName)
-  }, [currentTravelerName, gastosUserFilter])
+    // Espera os viajantes carregarem (senão cairia no e-mail como nome).
+    if (!gastosUserFilter && currentTraveler) setGastosUserFilter(currentTraveler.name)
+  }, [currentTraveler, gastosUserFilter])
 
   // Opções do dropdown único "Responsável pelo Pagamento": 'individual' (padrão
   // — cada um paga o seu, sem gerar cobrança) ou o nome de um viajante
@@ -1853,7 +1854,7 @@ function Dashboard({ session }) {
 
   async function handleAddExpense(form) {
     const { paidBy, splitType } = resolveResponsavel(form.responsavel)
-    const { error } = await supabase.from('expenses_ledger').insert({
+    const { data: created, error } = await supabase.from('expenses_ledger').insert({
       trip_id: trip.id,
       transaction_date: form.transaction_date || todayIso(),
       description: form.description,
@@ -1867,7 +1868,20 @@ function Dashboard({ session }) {
       status: 'confirmado',
       created_by: session.user.id,
     })
+      .select('id')
+      .single()
     if (error) throw error
+    if (splitType === 'individual' && form.apply_to_all) {
+      await duplicateExpenseForOthers({
+        originalExpenseId: created.id,
+        paidBy,
+        totalCost: form.total_cost_eur ? Number(form.total_cost_eur) : 0,
+        date: form.transaction_date || todayIso(),
+        description: form.description,
+        category: form.category || null,
+        status: 'confirmado',
+      })
+    }
     await refreshFinancials()
   }
 
@@ -3190,12 +3204,14 @@ function Dashboard({ session }) {
                   onChange={(e) => setGastosUserFilter(e.target.value)}
                   className="w-40 rounded-md border border-input bg-card px-2 py-1 font-mono text-[10px] text-foreground"
                 >
+                  {[...travelers]
+                    .sort((a, b) => (b.name === currentTravelerName) - (a.name === currentTravelerName))
+                    .map((t) => (
+                      <option key={t.id} value={t.name}>
+                        {t.name}
+                      </option>
+                    ))}
                   <option value="Todos">Todos</option>
-                  {travelers.map((t) => (
-                    <option key={t.id} value={t.name}>
-                      {t.name}
-                    </option>
-                  ))}
                 </select>
               </div>
 
@@ -3649,6 +3665,13 @@ function Dashboard({ session }) {
             },
             { name: 'booking_rule', label: 'Regra de compra' },
             { name: 'ticket_url', label: 'Link do ingresso', type: 'url' },
+            {
+              name: 'apply_to_all',
+              label: 'Aplicar custo a todos os viajantes',
+              type: 'checkbox',
+              default: false,
+              hideWhen: (values) => values.responsavel !== 'individual',
+            },
             { name: 'notes', label: 'Notas', type: 'textarea' },
           ]}
         />
