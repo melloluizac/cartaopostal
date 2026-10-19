@@ -2537,6 +2537,16 @@ function Dashboard({ session }) {
     return Math.max(Math.round((end - start) / 86400000) + 1, 1)
   }, [effectiveStartDate, effectiveEndDate])
 
+  // Dias já decorridos da viagem (0 se ainda não começou), limitado à duração.
+  const elapsedTripDays = useMemo(() => {
+    if (!effectiveStartDate || !tripDurationDays) return null
+    const today = new Date()
+    today.setHours(0, 0, 0, 0)
+    const start = new Date(`${effectiveStartDate}T00:00:00`)
+    if (today < start) return 0
+    return Math.min(Math.round((today - start) / 86400000) + 1, tripDurationDays)
+  }, [effectiveStartDate, tripDurationDays])
+
   // Uma linha de métricas por categoria: gasto, limite, % consumido, cor do
   // farol, quanto falta e o ritmo diário recalculado com base no que já foi
   // gasto até agora.
@@ -2559,17 +2569,6 @@ function Dashboard({ session }) {
     })
   }, [categoryTotals, budgetsByUserCategory, gastosUserFilter, remainingTripDays])
 
-  // Pizza de média diária — só 3 categorias de gasto do dia a dia, sempre
-  // respeitando o mesmo usuário/status selecionados acima.
-  const DAILY_PIE_CATEGORIES = ['Alimentação', 'Compras', 'Passeio']
-  const DAILY_PIE_COLORS = { Alimentação: '#b85c38', Compras: '#8b9a7a', Passeio: '#37656e' }
-  const dailyPieData = useMemo(() => {
-    if (!tripDurationDays) return []
-    return DAILY_PIE_CATEGORIES.map((cat) => {
-      const spent = categoryTotals.find(([c]) => c === cat)?.[1] ?? 0
-      return { category: cat, dailyAverage: spent / tripDurationDays, color: DAILY_PIE_COLORS[cat] }
-    })
-  }, [categoryTotals, tripDurationDays])
 
   // "Cidade" não é um campo real de expenses_ledger — extrai de forma
   // aproximada o texto entre parênteses no fim da descrição (padrão que o
@@ -3244,7 +3243,18 @@ function Dashboard({ session }) {
               {/* Barras de orçamento por categoria — farol de cor conforme o
                   % consumido do limite configurado pra pessoa selecionada
                   acima. Categorias sem limite definido ficam num cinza neutro. */}
-              <div className="mt-4 flex flex-col gap-3">
+              {tripDurationDays ? (
+                <p className="mt-3 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                  {elapsedTripDays > 0
+                    ? `Dia ${elapsedTripDays} de ${tripDurationDays} · faltam ${remainingTripDays ?? 0} dias`
+                    : `A viagem começa em breve · ${tripDurationDays} dias`}
+                </p>
+              ) : (
+                <p className="mt-3 rounded-xl border border-dashed border-border p-3 text-center font-mono text-[10px] text-muted-foreground">
+                  Cadastre itens com data no Roteiro (ou defina início e término) pra ver as médias diárias.
+                </p>
+              )}
+              <div className="mt-2 flex flex-col gap-3">
                 {budgetProgress.map((row) => {
                   const CategoryIcon = CATEGORY_ICONS[row.category]
                   return (
@@ -3285,20 +3295,17 @@ function Dashboard({ session }) {
                         }}
                       />
                     </div>
-                    {row.limit != null ? (
-                      <div className="mt-1 flex items-center justify-between font-mono text-[10px] text-muted-foreground">
-                        <span>
-                          {row.percent.toFixed(0)}% consumido · falta {formatMoney(Math.max(row.totalRestante, 0))}
-                          {row.totalRestante < 0 && ' (estourado)'}
-                        </span>
-                        {row.mediaRestante != null && (
-                          <span className="shrink-0 pl-2 text-primary">
-                            {formatMoney(Math.max(row.mediaRestante, 0))}/dia restante
-                          </span>
-                        )}
-                      </div>
-                    ) : (
-                      <p className="mt-1 font-mono text-[10px] text-muted-foreground">Sem orçamento definido</p>
+                    <p className="mt-1 font-mono text-[10px] text-muted-foreground">
+                      {row.limit != null
+                        ? `${row.percent.toFixed(0)}% consumido · falta ${formatMoney(Math.max(row.totalRestante, 0))}${
+                            row.totalRestante < 0 ? ' (estourado)' : ''
+                          }`
+                        : 'Sem orçamento definido'}
+                    </p>
+                    {row.mediaRestante != null && (
+                      <p className="mt-0.5 font-mono text-[10px] text-primary">
+                        Pode gastar: {formatMoney(Math.max(row.mediaRestante, 0))}/dia
+                      </p>
                     )}
                   </div>
                   )
@@ -3306,63 +3313,6 @@ function Dashboard({ session }) {
               </div>
               <p className="mt-2 font-mono text-[10px] text-muted-foreground">
                 Toque numa categoria pra ver só os lançamentos dela.
-              </p>
-            </section>
-
-            <section aria-labelledby="pizza-heading">
-              <h2
-                id="pizza-heading"
-                className="mb-2 font-mono text-xs uppercase tracking-wide text-muted-foreground"
-              >
-                Média diária (Alimentação, Compras, Passeio)
-              </h2>
-              {!tripDurationDays ? (
-                <p className="rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
-                  Cadastre ao menos um item com data no Roteiro (ou defina início e término da viagem) pra ver a média diária.
-                </p>
-              ) : (
-                <div className="flex items-center gap-4">
-                  <div
-                    className="h-28 w-28 shrink-0 rounded-full"
-                    style={{
-                      background:
-                        dailyPieData.reduce((sum, d) => sum + d.dailyAverage, 0) > 0
-                          ? `conic-gradient(${(() => {
-                              const total = dailyPieData.reduce((sum, d) => sum + d.dailyAverage, 0) || 1
-                              let cumulative = 0
-                              return dailyPieData
-                                .map((d) => {
-                                  const start = (cumulative / total) * 360
-                                  cumulative += d.dailyAverage
-                                  const end = (cumulative / total) * 360
-                                  return `${d.color} ${start}deg ${end}deg`
-                                })
-                                .join(', ')
-                            })()})`
-                          : '#e2d9c3',
-                    }}
-                    aria-hidden="true"
-                  />
-                  <div className="flex flex-1 flex-col gap-1.5">
-                    {dailyPieData.map((d) => (
-                      <div key={d.category} className="flex items-center justify-between font-mono text-[11px]">
-                        <span className="flex items-center gap-1.5 text-foreground">
-                          <span
-                            className="h-2 w-2 shrink-0 rounded-full"
-                            style={{ backgroundColor: d.color }}
-                            aria-hidden="true"
-                          />
-                          {d.category}
-                        </span>
-                        <span className="text-muted-foreground">{formatMoney(d.dailyAverage)}/dia</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-              <p className="mt-2 font-mono text-[10px] text-muted-foreground">
-                Média = gasto da categoria ÷ {tripDurationDays ?? '—'} dias de viagem, respeitando o usuário e os
-                status marcados acima.
               </p>
             </section>
 
