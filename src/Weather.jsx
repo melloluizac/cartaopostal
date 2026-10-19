@@ -459,11 +459,34 @@ export default function WeatherTab({ destinations, accommodations, activities, t
     [cities]
   )
 
-  const load = useCallback(async () => {
+  // Atualização diária: se já existe uma leitura de HOJE para as mesmas
+  // cidades/datas, usa a salva. Só busca de novo amanhã, quando o Roteiro
+  // mudar, ou se a pessoa tocar em "Atualizar agora" (force).
+  const load = useCallback(async (force = false) => {
     if (!cities.length) return
+    const today = toIso(new Date())
+    const hist0 = lsGet(LS_HIST) || []
+    const saved = hist0.find((h) => h.day === today)
+    if (!force && saved && !saved.partial && saved.sig === citiesSignature && Object.keys(saved.data).length) {
+      const base0 = [...hist0].reverse().find((h) => h.day < today)
+      const changes0 = {}
+      if (base0) {
+        for (const [key, cur] of Object.entries(saved.data)) {
+          const d = diffReading(base0.data[key], cur)
+          if (d) changes0[key] = d
+        }
+      }
+      setChangesByKey(changes0)
+      setBaseDay(base0?.day ?? null)
+      setWeather(saved.data)
+      const at = saved.at ? new Date(saved.at) : null
+      setStatus(
+        `Leitura de hoje${at ? ` (${pad(at.getHours())}:${pad(at.getMinutes())})` : ''}. Atualiza sozinha amanhã, ou toque em “Atualizar agora”.`
+      )
+      return
+    }
     setLoading(true)
     setStatus('')
-    const today = toIso(new Date())
     const out = {}
     const failed = []
     await Promise.all(
@@ -520,14 +543,14 @@ export default function WeatherTab({ destinations, accommodations, activities, t
 
     // leituras do mesmo dia se substituem
     const next = hist.filter((h) => h.day !== today)
-    next.push({ day: today, data: out })
+    next.push({ day: today, data: out, sig: citiesSignature, at: Date.now(), partial: failed.length > 0 })
     lsSet(LS_HIST, next.slice(-MAX_HIST))
 
     const msgs = []
     if (failed.length) msgs.push(`Cidade não encontrada: ${failed.join(', ')}.`)
     setStatus(msgs.join(' ') || `Atualizado às ${pad(new Date().getHours())}:${pad(new Date().getMinutes())}`)
     setLoading(false)
-  }, [cities])
+  }, [cities, citiesSignature])
 
   // Busca ao abrir a aba e quando o Roteiro muda (cidades/datas)
   useEffect(() => {
@@ -584,7 +607,7 @@ export default function WeatherTab({ destinations, accommodations, activities, t
           </h2>
           <button
             type="button"
-            onClick={load}
+            onClick={() => load(true)}
             disabled={loading}
             className="flex items-center gap-1.5 rounded-md border border-border bg-card px-2.5 py-1.5 font-mono text-[10px] uppercase tracking-wide text-foreground disabled:opacity-60"
           >
