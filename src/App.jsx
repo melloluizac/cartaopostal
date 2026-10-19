@@ -1553,25 +1553,16 @@ function Dashboard({ session }) {
       )
     }
 
-    for (const other of others) {
-      const { error } = await supabase.from('expenses_ledger').insert({
-        trip_id: trip.id,
-        transaction_date: date || todayIso(),
-        description,
-        category,
-        total_cost_eur: totalCost,
-        paid_by: other.name,
-        split_type: 'individual',
-        status: status || 'confirmado',
-        created_by: other.user_id,
-        parent_id: originalExpenseId,
-      })
-      if (error) {
-        warn(`Falha ao replicar o gasto pra ${other.name}: ${error.message}`)
-        return
-      }
+    if (others.length === 0) return
+    // Criação feita no servidor (SECURITY DEFINER): o RLS não deixa uma pessoa
+    // inserir linha com created_by de outra, então a função faz isso por ela.
+    const { data, error } = await supabase.rpc('create_expense_twins', { p_expense_id: originalExpenseId })
+    if (error) {
+      warn(`Falha ao replicar o gasto: ${error.message}`)
+      return
     }
-    if (others.length > 0) await refreshFinancials()
+    if (!data) warn('Nenhuma cópia foi criada para o outro viajante (verifique o vínculo em trip_travelers).')
+    await refreshFinancials()
   }
 
   // Ao editar, decide o que fazer com a cópia do parceiro conforme o checkbox
