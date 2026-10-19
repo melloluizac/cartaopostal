@@ -223,7 +223,12 @@ function LoginScreen() {
     }
 
     setLoading(true)
-    const { data, error } = await supabase.auth.signUp({ email, password })
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      // o link do e-mail volta pro site publicado, não pro localhost
+      options: { emailRedirectTo: window.location.origin },
+    })
     setLoading(false)
 
     if (error) {
