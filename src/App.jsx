@@ -1890,6 +1890,7 @@ function Dashboard({ session }) {
     const { error } = await supabase
       .from('expenses_ledger')
       .update({
+        description: (form.description || '').trim() || editingExpense?.description,
         total_cost_eur: totalCost,
         paid_by: paidBy,
         split_type: splitType,
@@ -1911,10 +1912,12 @@ function Dashboard({ session }) {
         paidBy,
         totalCost,
         date: editingExpense.transaction_date,
-        description: editingExpense.description,
+        description: (form.description || '').trim() || editingExpense.description,
         category: form.category || editingExpense.category,
         status: form.status || 'confirmado',
-        titleOrTotalChanged: totalCost !== Number(editingExpense.total_cost_eur ?? 0),
+        titleOrTotalChanged:
+          totalCost !== Number(editingExpense.total_cost_eur ?? 0) ||
+          ((form.description || '').trim() || editingExpense.description) !== editingExpense.description,
       })
     }
     await refreshFinancials()
@@ -2589,14 +2592,19 @@ function Dashboard({ session }) {
 
   // Lançamentos filtrados pra exibição dentro do drawer de auditoria.
   const ledgerFilteredExpenses = useMemo(() => {
-    return expenses.filter((e) => {
+    // Aberto pelo clique numa categoria: mostra exatamente o que compõe o
+    // total daquela barra (mesmos checkboxes de status e mesma pessoa).
+    const base = ledgerFilters.scoped ? statusFilteredExpenses : expenses
+    return base.filter((e) => {
+      if (ledgerFilters.scoped && gastosUserFilter !== 'Todos' && personShareOf(e, gastosUserFilter) <= 0) return false
       if (ledgerFilters.category !== 'all' && e.category !== ledgerFilters.category) return false
       if (ledgerFilters.paidBy !== 'all' && e.paid_by !== ledgerFilters.paidBy) return false
       if (ledgerFilters.status !== 'all' && (e.status ?? 'confirmado') !== ledgerFilters.status) return false
       if (ledgerFilters.city !== 'all' && expenseCityTag(e.description) !== ledgerFilters.city) return false
       return true
     })
-  }, [expenses, ledgerFilters])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [expenses, statusFilteredExpenses, ledgerFilters, gastosUserFilter, travelers])
 
   // Abre o drawer de Lançamentos já pré-filtrado — usado pelo drill-down dos
   // gráficos (clicar numa barra de categoria ou num card de saldo).
@@ -3243,7 +3251,7 @@ function Dashboard({ session }) {
                     <div key={row.category}>
                       <button
                         type="button"
-                        onClick={() => openLedgerDrawer({ category: row.category })}
+                        onClick={() => openLedgerDrawer({ category: row.category, scoped: true })}
                         className="mb-1 flex w-full items-center justify-between font-mono text-[11px] text-foreground"
                       >
                         <span className="flex items-center gap-1.5">
@@ -4034,6 +4042,12 @@ function Dashboard({ session }) {
             </div>
 
             <div className="flex-1 overflow-y-auto px-4 py-3">
+              {ledgerFilters.scoped && (
+                <p className="mb-2 font-mono text-[10px] text-muted-foreground">
+                  Mostrando o que compõe o total de {gastosUserFilter === 'Todos' ? 'todos' : gastosUserFilter}
+                  {' '}(status marcados em "Total da viagem").
+                </p>
+              )}
               {ledgerFilteredExpenses.length === 0 && (
                 <p className="rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
                   Nenhum lançamento encontrado com esses filtros.
@@ -4057,7 +4071,9 @@ function Dashboard({ session }) {
                           </p>
                         </div>
                         <p className="font-mono text-sm font-semibold text-foreground">
-                          {formatMoney(e.total_cost_eur)}
+                          {ledgerFilters.scoped && gastosUserFilter !== 'Todos'
+                            ? formatMoney(personShareOf(e, gastosUserFilter))
+                            : formatMoney(e.total_cost_eur)}
                         </p>
                       </div>
                       <div className="mt-1.5 flex items-center gap-1.5">
@@ -4148,6 +4164,7 @@ function Dashboard({ session }) {
           onSubmit={(form) => handleUpdateExpense(editingExpense.id, form)}
           onDelete={() => handleDeleteExpense(editingExpense.id)}
           fields={[
+            { name: 'description', label: 'Nome', required: true },
             { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
             {
               name: 'responsavel',
