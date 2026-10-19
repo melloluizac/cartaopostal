@@ -765,13 +765,20 @@ function Onboarding({ session, onTripReady }) {
   const [joinCode, setJoinCode] = useState('')
   const [joinError, setJoinError] = useState(null)
   const [joining, setJoining] = useState(false)
+  // Nome sugerido a partir do e-mail (a pessoa pode trocar). Vira a linha dela
+  // em trip_travelers, que é o que habilita "Quem pagou" e a cópia de gastos.
+  const suggestedName = (() => {
+    const base = (session.user.email ?? '').split('@')[0].replace(/[._-]+/g, ' ').trim()
+    return base ? base.charAt(0).toUpperCase() + base.slice(1) : ''
+  })()
+  const [joinName, setJoinName] = useState(suggestedName)
 
   async function handleCreateTrip(form) {
     let lastError = null
     // Tenta algumas vezes: se o código sortido colidir com um já existente
     // (UNIQUE), sorteia outro. Qualquer outro tipo de erro para na hora.
     for (let attempt = 0; attempt < 3; attempt++) {
-      const { error } = await supabase.from('trips').insert({
+      const { data: created, error } = await supabase.from('trips').insert({
         user_id: session.user.id,
         title: form.title,
         start_date: form.start_date || null,
@@ -779,8 +786,14 @@ function Onboarding({ session, onTripReady }) {
         currency: form.currency || 'EUR',
         base_euro_rate: form.base_euro_rate ? Number(form.base_euro_rate) : null,
         invite_code: generateInviteCode(),
-      })
+      }).select('id').single()
       if (!error) {
+        const myName = (form.my_name || suggestedName || 'Eu').trim()
+        const { error: travelerError } = await supabase.rpc('add_my_traveler', {
+          p_trip: created.id,
+          p_name: myName,
+        })
+        if (travelerError) throw travelerError
         await onTripReady()
         return
       }
@@ -799,21 +812,22 @@ function Onboarding({ session, onTripReady }) {
     setJoining(true)
     setJoinError(null)
 
-    const { data, error } = await supabase.rpc('find_trip_by_invite_code', { code })
-    if (error || !data || data.length === 0) {
-      setJoinError('Código não encontrado. Confira com quem te enviou.')
+    if (!joinName.trim()) {
+      setJoinError('Informe seu nome na viagem.')
       setJoining(false)
       return
     }
 
-    const { error: insertError } = await supabase
-      .from('trip_participants')
-      .insert({ trip_id: data[0].id, user_id: session.user.id })
+    // Uma função no servidor entra na viagem e cria/vincula o viajante da
+    // pessoa (nome + conta) de uma vez.
+    const { error: joinErr } = await supabase.rpc('join_trip', { p_code: code, p_name: joinName.trim() })
     setJoining(false)
-
-    // 23505 = unique_violation — já era participante, trata como sucesso.
-    if (insertError && insertError.code !== '23505') {
-      setJoinError(insertError.message)
+    if (joinErr) {
+      setJoinError(
+        /não encontrado|not found/i.test(joinErr.message)
+          ? 'Código não encontrado. Confira com quem te enviou.'
+          : joinErr.message
+      )
       return
     }
 
@@ -864,6 +878,16 @@ function Onboarding({ session, onTripReady }) {
             placeholder="EUR26X"
             className="rounded-lg border border-input bg-card px-3 py-3 text-center font-mono text-2xl tracking-[0.3em] text-foreground outline-none ring-primary/40 focus:ring-2"
           />
+          <label className="mt-1 font-mono text-xs uppercase tracking-wide text-muted-foreground">
+            Seu nome na viagem
+          </label>
+          <input
+            type="text"
+            value={joinName}
+            onChange={(e) => setJoinName(e.target.value)}
+            placeholder="Como você aparece nos gastos"
+            className="rounded-lg border border-input bg-card px-3 py-3 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
+          />
           {joinError && (
             <p className="rounded-lg border border-rosewood/40 bg-rosewood/10 px-3 py-2 font-mono text-xs text-rosewood">
               {joinError}
@@ -898,6 +922,7 @@ function Onboarding({ session, onTripReady }) {
           onSubmit={handleCreateTrip}
           fields={[
             { name: 'title', label: 'Título da viagem', required: true },
+            { name: 'my_name', label: 'Seu nome na viagem', required: true, default: suggestedName },
             { name: 'start_date', label: 'Data de início', type: 'date' },
             { name: 'end_date', label: 'Data de término', type: 'date' },
             {
