@@ -956,6 +956,17 @@ function Dashboard({ session }) {
   // (a cópia é invisível pra quem edita), então carrega ao abrir a edição.
   const [editTwins, setEditTwins] = useState({ ready: false, has: false })
 
+
+  // Modal customizado substituindo window.confirm — devolve uma Promise
+  // que só resolve quando a pessoa clica num dos dois botões.
+  function askSyncChoice() {
+    return new Promise((resolve) => setSyncPrompt({ resolve }))
+  }
+  const [loading, setLoading] = useState(true)
+  const [openSheet, setOpenSheet] = useState(null) // 'activity' | 'transport' | 'expense' | null
+  const [editingItem, setEditingItem] = useState(null) // { kind: 'activity' | 'transport', data: {...} } | null
+  const [errorMsg, setErrorMsg] = useState(null)
+
   useEffect(() => {
     if (!editingItem && !editingExpense) {
       setEditTwins({ ready: false, has: false })
@@ -980,16 +991,6 @@ function Dashboard({ session }) {
       cancelled = true
     }
   }, [editingItem, editingExpense])
-
-  // Modal customizado substituindo window.confirm — devolve uma Promise
-  // que só resolve quando a pessoa clica num dos dois botões.
-  function askSyncChoice() {
-    return new Promise((resolve) => setSyncPrompt({ resolve }))
-  }
-  const [loading, setLoading] = useState(true)
-  const [openSheet, setOpenSheet] = useState(null) // 'activity' | 'transport' | 'expense' | null
-  const [editingItem, setEditingItem] = useState(null) // { kind: 'activity' | 'transport', data: {...} } | null
-  const [errorMsg, setErrorMsg] = useState(null)
   // Aba "Detalhes"
   const [reminders, setReminders] = useState([])
   const [newReminderText, setNewReminderText] = useState('')
