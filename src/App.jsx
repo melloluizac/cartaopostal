@@ -27,7 +27,9 @@ import {
   ArrowRight,
   UtensilsCrossed,
   ShoppingBag,
+  CloudSun,
 } from 'lucide-react'
+import WeatherTab from './Weather'
 
 // -----------------------------------------------------------------------
 // Helpers
@@ -922,7 +924,7 @@ function Onboarding({ session, onTripReady }) {
 
 
 function Dashboard({ session }) {
-  const [view, setView] = useState('home') // 'home' | 'roteiro' | 'gastos'
+  const [view, setView] = useState('home') // 'home' | 'roteiro' | 'gastos' | 'detalhes' | 'clima'
   const [trip, setTrip] = useState(null)
   const [destinations, setDestinations] = useState([])
   const [travelers, setTravelers] = useState([]) // linhas de trip_travelers, para os dropdowns "Pago por"
@@ -2688,16 +2690,17 @@ function Dashboard({ session }) {
           >
             <Home className="h-4 w-4" aria-hidden="true" />
           </button>
-          <div className="grid flex-1 grid-cols-3 gap-1">
+          <div className="grid flex-1 grid-cols-4 gap-1">
             {[
               { key: 'roteiro', label: 'Roteiro', icon: MapPin },
               { key: 'gastos', label: 'Gastos', icon: Wallet },
               { key: 'detalhes', label: 'Detalhes', icon: ClipboardList },
+              { key: 'clima', label: 'Clima', icon: CloudSun },
             ].map(({ key, label, icon: NavIcon }) => (
               <button
                 key={key}
                 onClick={() => setView(key)}
-                className={`flex items-center justify-center gap-1.5 rounded-md py-1.5 font-mono text-[11px] uppercase tracking-wide transition-colors ${
+                className={`flex items-center justify-center gap-1 rounded-md py-1.5 font-mono text-[10px] uppercase tracking-tight transition-colors ${
                   view === key ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'
                 }`}
               >
@@ -3372,6 +3375,16 @@ function Dashboard({ session }) {
               Ver todos os Lançamentos
             </button>
           </div>
+        )}
+
+        {/* ================= TELA 5 — CLIMA ================= */}
+        {view === 'clima' && (
+          <WeatherTab
+            destinations={destinations}
+            accommodations={overviewAccommodations}
+            activities={overviewActivities}
+            transport={overviewTransport}
+          />
         )}
 
         {/* ================= TELA 4 — DETALHES ================= */}
