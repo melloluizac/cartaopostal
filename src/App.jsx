@@ -1026,6 +1026,8 @@ function Dashboard({ session }) {
   // Aba "Detalhes"
   const [reminders, setReminders] = useState([])
   const [newReminderText, setNewReminderText] = useState('')
+  const [editingReminderId, setEditingReminderId] = useState(null)
+  const [editingReminderText, setEditingReminderText] = useState('')
   const [expandedCityNotes, setExpandedCityNotes] = useState(() => new Set())
   const [cityNotes, setCityNotes] = useState([]) // linhas de city_notes (1 por destino, criada sob demanda)
   const [codeCopied, setCodeCopied] = useState(false)
@@ -1406,6 +1408,19 @@ function Dashboard({ session }) {
       .from('trip_reminders')
       .update({ is_completed: !reminder.is_completed })
       .eq('id', reminder.id)
+    if (error) {
+      setErrorMsg(error.message)
+      return
+    }
+    await loadReminders()
+  }
+
+  async function handleSaveReminderEdit() {
+    const text = editingReminderText.trim()
+    const id = editingReminderId
+    setEditingReminderId(null)
+    if (!id || !text) return
+    const { error } = await supabase.from('trip_reminders').update({ task_text: text }).eq('id', id)
     if (error) {
       setErrorMsg(error.message)
       return
@@ -2861,13 +2876,13 @@ function Dashboard({ session }) {
                   return (
                     <div
                       key={row.accommodation_id ?? i}
-                      className="flex items-center gap-2 rounded-lg border border-accent/40 bg-accent/10 px-3 py-2.5"
+                      className="flex items-center gap-2 rounded-md border border-accent/40 bg-accent/10 px-3 py-1"
                     >
-                      <p className="min-w-0 flex-1 truncate font-mono text-sm text-foreground">
+                      <p className="min-w-0 flex-1 truncate font-mono text-xs leading-tight text-foreground">
                         {row.hotel_name}
-                        <span className="text-[11px] text-muted-foreground"> · {row.city_name}</span>
+                        <span className="text-[10px] text-muted-foreground"> · {row.city_name}</span>
                       </p>
-                      <span className="shrink-0 font-mono text-[11px] font-semibold text-accent">
+                      <span className="shrink-0 font-mono text-[10px] font-semibold text-accent">
                         {days <= 0 ? 'vence hoje' : `${days}d restantes`}
                       </span>
                     </div>
@@ -3445,7 +3460,32 @@ function Dashboard({ session }) {
                         onChange={() => handleToggleReminder(r)}
                         className="h-4 w-4 shrink-0 accent-primary"
                       />
-                      <span className="flex-1 font-mono text-sm text-foreground">{r.task_text}</span>
+                      {editingReminderId === r.id ? (
+                        <input
+                          type="text"
+                          autoFocus
+                          value={editingReminderText}
+                          onChange={(e) => setEditingReminderText(e.target.value)}
+                          onBlur={handleSaveReminderEdit}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') handleSaveReminderEdit()
+                            if (e.key === 'Escape') setEditingReminderId(null)
+                          }}
+                          className="min-w-0 flex-1 rounded-md border border-input bg-background px-2 py-0.5 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
+                        />
+                      ) : (
+                        <span className="flex-1 font-mono text-sm text-foreground">{r.task_text}</span>
+                      )}
+                      <button
+                        onClick={() => {
+                          setEditingReminderId(r.id)
+                          setEditingReminderText(r.task_text)
+                        }}
+                        aria-label="Editar lembrete"
+                        className="shrink-0 rounded-full p-1 text-muted-foreground hover:bg-muted"
+                      >
+                        <Pencil className="h-3.5 w-3.5" aria-hidden="true" />
+                      </button>
                       <button
                         onClick={() => handleDeleteReminder(r.id)}
                         aria-label="Excluir lembrete"
@@ -3670,13 +3710,6 @@ function Dashboard({ session }) {
             },
             { name: 'booking_rule', label: 'Regra de compra' },
             { name: 'ticket_url', label: 'Link do ingresso', type: 'url' },
-            {
-              name: 'apply_to_all',
-              label: 'Aplicar custo a todos os viajantes',
-              type: 'checkbox',
-              default: false,
-              hideWhen: (values) => values.responsavel !== 'individual',
-            },
             { name: 'notes', label: 'Notas', type: 'textarea' },
           ]}
         />
@@ -3981,6 +4014,13 @@ function Dashboard({ session }) {
               default: 'individual',
               row: 'money',
               width: '2/3',
+            },
+            {
+              name: 'apply_to_all',
+              label: 'Aplicar custo a todos os viajantes',
+              type: 'checkbox',
+              default: false,
+              hideWhen: (values) => values.responsavel !== 'individual',
             },
             { name: 'notes', label: 'Notas', type: 'textarea' },
           ]}
