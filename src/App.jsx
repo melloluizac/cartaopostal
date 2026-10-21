@@ -31,6 +31,7 @@ import {
 } from 'lucide-react'
 import WeatherTab from './Weather'
 import RoteiroExport from './RoteiroExport'
+import { ErrorNote, friendlyError } from './lib/friendlyError'
 
 // -----------------------------------------------------------------------
 // Helpers
@@ -204,7 +205,7 @@ function LoginScreen() {
     const { error } = await supabase.auth.signInWithPassword({ email, password })
     setLoading(false)
     if (error) {
-      setError(error.message)
+      setError(friendlyError(error))
       return
     }
     localStorage.setItem('cartaoPostalLastEmail', email)
@@ -233,7 +234,7 @@ function LoginScreen() {
     setLoading(false)
 
     if (error) {
-      setError(error.message)
+      setError(friendlyError(error))
       return
     }
 
@@ -358,11 +359,7 @@ function LoginScreen() {
               </div>
             )}
 
-            {error && (
-              <p className="rounded-lg border border-rosewood/40 bg-rosewood/10 px-3 py-2 font-mono text-xs text-rosewood">
-                {error}
-              </p>
-            )}
+            {error && <ErrorNote error={error} />}
 
             <button
               type="submit"
@@ -432,7 +429,7 @@ function QuickAddSheet({ title, icon: Icon, fields, initialValues, onSubmit, onD
       await onSubmit(form)
       onClose()
     } catch (err) {
-      setError(err.message ?? 'Erro ao salvar.')
+      setError(friendlyError(err, 'Não foi possível salvar. Tente novamente.'))
     } finally {
       setSaving(false)
     }
@@ -445,7 +442,7 @@ function QuickAddSheet({ title, icon: Icon, fields, initialValues, onSubmit, onD
       await onDelete()
       onClose()
     } catch (err) {
-      setError(err.message ?? 'Erro ao excluir.')
+      setError(friendlyError(err, 'Não foi possível excluir. Tente novamente.'))
       setDeleting(false)
     }
   }
@@ -642,11 +639,7 @@ function QuickAddSheet({ title, icon: Icon, fields, initialValues, onSubmit, onD
             )
           })}
 
-          {error && (
-            <p className="rounded-lg border border-rosewood/40 bg-rosewood/10 px-3 py-2 font-mono text-xs text-rosewood">
-              {error}
-            </p>
-          )}
+          {error && <ErrorNote error={error} />}
 
           <button
             type="submit"
@@ -832,7 +825,7 @@ function Onboarding({ session, onTripReady }) {
       setJoinError(
         /não encontrado|not found/i.test(joinErr.message)
           ? 'Código não encontrado. Confira com quem te enviou.'
-          : joinErr.message
+          : friendlyError(joinErr)
       )
       return
     }
@@ -1100,7 +1093,7 @@ function Dashboard({ session }) {
       if (error.code !== '23505') break
     }
     setGeneratingCode(false)
-    setErrorMsg(lastError?.message ?? 'Não foi possível gerar o código.')
+    setErrorMsg(friendlyError(lastError, 'Não foi possível gerar o código. Tente novamente.'))
   }
 
   // Carrega a viagem do usuário logado (como dona OU como participante via
@@ -1117,7 +1110,7 @@ function Dashboard({ session }) {
       .limit(1)
 
     if (ownedError) {
-      setErrorMsg(ownedError.message)
+      setErrorMsg(friendlyError(ownedError, 'Não foi possível carregar sua viagem. Recarregue a página.'))
       setLoading(false)
       return
     }
@@ -1397,7 +1390,7 @@ function Dashboard({ session }) {
     if (!text || !trip) return
     const { error } = await supabase.from('trip_reminders').insert({ trip_id: trip.id, task_text: text, is_completed: false })
     if (error) {
-      setErrorMsg(error.message)
+      setErrorMsg(friendlyError(error))
       return
     }
     setNewReminderText('')
@@ -1410,7 +1403,7 @@ function Dashboard({ session }) {
       .update({ is_completed: !reminder.is_completed })
       .eq('id', reminder.id)
     if (error) {
-      setErrorMsg(error.message)
+      setErrorMsg(friendlyError(error))
       return
     }
     await loadReminders()
@@ -1423,7 +1416,7 @@ function Dashboard({ session }) {
     if (!id || !text) return
     const { error } = await supabase.from('trip_reminders').update({ task_text: text }).eq('id', id)
     if (error) {
-      setErrorMsg(error.message)
+      setErrorMsg(friendlyError(error))
       return
     }
     await loadReminders()
@@ -1432,7 +1425,7 @@ function Dashboard({ session }) {
   async function handleDeleteReminder(id) {
     const { error } = await supabase.from('trip_reminders').delete().eq('id', id)
     if (error) {
-      setErrorMsg(error.message)
+      setErrorMsg(friendlyError(error))
       return
     }
     await loadReminders()
@@ -1477,7 +1470,7 @@ function Dashboard({ session }) {
         .update({ notes_content: text, updated_at: new Date().toISOString() })
         .eq('id', existing.id)
       if (error) {
-        setErrorMsg(error.message)
+        setErrorMsg(friendlyError(error))
         return
       }
     } else {
@@ -1485,7 +1478,7 @@ function Dashboard({ session }) {
         .from('city_notes')
         .insert({ destination_id: destId, notes_content: text })
       if (error) {
-        setErrorMsg(error.message)
+        setErrorMsg(friendlyError(error))
         return
       }
     }
@@ -1567,7 +1560,10 @@ function Dashboard({ session }) {
     }
     if (unlinked.length > 0) {
       warn(
-        `Não deu pra replicar o gasto pra ${unlinked.map((t) => t.name).join(', ')}: a conta dessa pessoa ainda não está vinculada em trip_travelers (coluna user_id).`
+        {
+          message: `O gasto não foi copiado para ${unlinked.map((t) => t.name).join(', ')}: essa pessoa ainda não entrou na viagem com a própria conta.`,
+          detail: 'trip_travelers.user_id vazio para esse viajante.',
+        }
       )
     }
 
@@ -1576,10 +1572,13 @@ function Dashboard({ session }) {
     // inserir linha com created_by de outra, então a função faz isso por ela.
     const { data, error } = await supabase.rpc('create_expense_twins', { p_expense_id: originalExpenseId })
     if (error) {
-      warn(`Falha ao replicar o gasto: ${error.message}`)
+      warn({ ...(friendlyError(error, 'Não foi possível copiar o gasto para os outros viajantes.')) })
       return
     }
-    if (!data) warn('Nenhuma cópia foi criada para o outro viajante (verifique o vínculo em trip_travelers).')
+    if (!data) warn({
+      message: 'O gasto foi salvo, mas não foi copiado para o outro viajante.',
+      detail: 'create_expense_twins retornou 0 cópias; verifique o vínculo em trip_travelers.',
+    })
     await refreshFinancials()
   }
 
@@ -1661,7 +1660,7 @@ function Dashboard({ session }) {
   async function handleStatusChange(table, id, newStatus, linkedExpenseId) {
     const { error } = await supabase.from(table).update({ status: newStatus }).eq('id', id)
     if (error) {
-      setErrorMsg(error.message)
+      setErrorMsg(friendlyError(error))
       return
     }
     // Propaga pro gasto vinculado também — sem isso, o extrato financeiro
@@ -2786,11 +2785,7 @@ function Dashboard({ session }) {
       </header>
 
       <main className="mx-auto flex max-w-2xl flex-col gap-6 px-4 pt-5">
-        {errorMsg && (
-          <p className="rounded-lg border border-rosewood/40 bg-rosewood/10 px-3 py-2 font-mono text-xs text-rosewood">
-            {errorMsg}
-          </p>
-        )}
+        {errorMsg && <ErrorNote error={errorMsg} />}
 
         {/* ================= TELA 1 — INÍCIO ================= */}
         {view === 'home' && (
