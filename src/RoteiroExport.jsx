@@ -58,7 +58,7 @@ function buildDays({ destinations, accommodations, activities, transport }) {
     const arr = hhmm(t.arrival_time)
     push(t.departure_date, {
       kind: 'transport',
-      sort: dep || '99:99',
+      sort: dep || '12:00', // sem horário: fica no meio do dia pra ordenar
       label: dep,
       name: `${t.origin_city} → ${t.destination_city}`,
       tag: arr ? `chegada ${arr}` : '',
@@ -71,7 +71,21 @@ function buildDays({ destinations, accommodations, activities, transport }) {
   if (!dates.length) return []
   const first = dates[0]
   return dates.map((date) => {
-    const items = byDate.get(date).sort((x, y) => x.sort.localeCompare(y.sort))
+    const raw = byDate.get(date)
+    // Regra do dia: check-out vem ANTES do transporte e check-in DEPOIS dele,
+    // mesmo que o horário "padrão" da hospedagem dissesse o contrário.
+    const tSorts = raw.filter((i) => i.kind === 'transport').map((i) => i.sort).sort()
+    if (tSorts.length) {
+      const firstT = tSorts[0]
+      const lastT = tSorts[tSorts.length - 1]
+      for (const it of raw) {
+        if (it.kind !== 'hotel') continue
+        if (it.tag === 'Check-out' && it.sort > firstT) it.sort = firstT
+        if (it.tag === 'Check-in' && it.sort < lastT) it.sort = lastT
+      }
+    }
+    const rank = (it) => (it.tag === 'Check-out' ? 0 : it.tag === 'Check-in' ? 2 : 1)
+    const items = raw.sort((x, y) => x.sort.localeCompare(y.sort) || rank(x) - rank(y))
     const cities = []
     for (const it of items) {
       const list = it.kind === 'transport' ? [it.from, it.to] : [it.city]
