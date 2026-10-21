@@ -30,6 +30,7 @@ import {
   CloudSun,
 } from 'lucide-react'
 import WeatherTab from './Weather'
+import RoteiroExport from './RoteiroExport'
 
 // -----------------------------------------------------------------------
 // Helpers
@@ -2901,6 +2902,14 @@ function Dashboard({ session }) {
                 <MapPin className="h-3.5 w-3.5" /> Roteiro
               </h2>
               <div className="flex items-center gap-3">
+                <RoteiroExport
+                  trip={trip}
+                  destinations={destinations}
+                  accommodations={overviewAccommodations}
+                  activities={overviewActivities}
+                  transport={overviewTransport}
+                  className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground underline underline-offset-2"
+                />
                 <button
                   type="button"
                   onClick={() => setOpenSheet('destination')}
