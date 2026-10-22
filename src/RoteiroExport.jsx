@@ -50,6 +50,7 @@ function buildDays({ destinations, accommodations, activities, transport }) {
       label: time || a.shift || '',
       name: a.activity_name,
       tag: '',
+      order: a.day_order ?? 1e9,
       city: cityOf(a.destination_id),
     })
   }
@@ -80,12 +81,13 @@ function buildDays({ destinations, accommodations, activities, transport }) {
       const lastT = tSorts[tSorts.length - 1]
       for (const it of raw) {
         if (it.kind !== 'hotel') continue
-        if (it.tag === 'Check-out' && it.sort > firstT) it.sort = firstT
-        if (it.tag === 'Check-in' && it.sort < lastT) it.sort = lastT
+        // colados no transporte: check-out logo antes, check-in logo depois
+        if (it.tag === 'Check-out') it.sort = firstT
+        if (it.tag === 'Check-in') it.sort = lastT
       }
     }
     const rank = (it) => (it.tag === 'Check-out' ? 0 : it.tag === 'Check-in' ? 2 : 1)
-    const items = raw.sort((x, y) => x.sort.localeCompare(y.sort) || rank(x) - rank(y))
+    const items = raw.sort((x, y) => x.sort.localeCompare(y.sort) || rank(x) - rank(y) || (x.order ?? 0) - (y.order ?? 0))
     const cities = []
     for (const it of items) {
       const list = it.kind === 'transport' ? [it.from, it.to] : [it.city]

@@ -1655,6 +1655,27 @@ function Dashboard({ session }) {
     }
   }
 
+  // Reordena passeios SEM horário exato dentro do mesmo turno do mesmo dia.
+  // `group` = os passeios desse turno, na ordem atual da tela; troca o item
+  // da posição `pos` com o vizinho (dir = -1 sobe, +1 desce) e regrava a
+  // numeração 1..n do grupo todo.
+  async function handleMoveActivity(group, pos, dir) {
+    const target = pos + dir
+    if (target < 0 || target >= group.length) return
+    const ids = group.map((g) => g.data.id)
+    ;[ids[pos], ids[target]] = [ids[target], ids[pos]]
+    const results = await Promise.all(
+      ids.map((id, i) => supabase.from('itinerary_activities').update({ day_order: i + 1 }).eq('id', id))
+    )
+    const failed = results.find((r) => r.error)
+    if (failed) {
+      setErrorMsg(friendlyError(failed.error))
+      return
+    }
+    await loadItineraryData(activeDestId)
+    await loadPendingCount()
+  }
+
   // Atualiza o status de uma linha (hospedagem, passeio ou transporte) ao
   // clicar no badge, e recarrega tudo que depende disso.
   async function handleStatusChange(table, id, newStatus, linkedExpenseId) {
@@ -2412,7 +2433,16 @@ function Dashboard({ session }) {
       .sort(([a], [b]) => (a === 'Sem data' ? 1 : b === 'Sem data' ? -1 : a.localeCompare(b)))
       .map(([date, items]) => ({
         date,
-        items: items.sort((a, b) => (timelineSortKey(a) ?? '99:99').localeCompare(timelineSortKey(b) ?? '99:99')),
+        items: items.sort((a, b) => {
+          const byKey = (timelineSortKey(a) ?? '99:99').localeCompare(timelineSortKey(b) ?? '99:99')
+          if (byKey !== 0) return byKey
+          // empate (ex.: vários passeios só com o mesmo turno): vale a ordem
+          // escolhida na mão (day_order); sem ordem, vão pro fim, na ordem original.
+          if (a.kind === 'activity' && b.kind === 'activity') {
+            return (a.data.day_order ?? 1e9) - (b.data.day_order ?? 1e9)
+          }
+          return 0
+        }),
       }))
   }, [filteredAccommodations, filteredActivities, filteredTransport, destinations, activeDestId])
 
@@ -2444,9 +2474,16 @@ function Dashboard({ session }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDestId, statusFilter, categoryFilter])
 
+  // Hospedagem já "Confirmada" não precisa mais do alerta de cancelamento.
   const urgentAlerts = useMemo(
-    () => alertRows.filter((row) => (row.days_remaining ?? daysUntil(row.cancellation_deadline)) <= 7),
-    [alertRows]
+    () =>
+      alertRows.filter((row) => {
+        if ((row.days_remaining ?? daysUntil(row.cancellation_deadline)) > 7) return false
+        const status =
+          overviewAccommodations.find((a) => a.id === row.accommodation_id)?.status ?? row.status
+        return status !== 'confirmado'
+      }),
+    [alertRows, overviewAccommodations]
   )
 
   // Estimativa de custo por status: os 3 grupos são independentes agora —
@@ -3022,8 +3059,19 @@ function Dashboard({ session }) {
                         {realItems.map((item, idx) => {
                           const isAccommodation = item.kind === 'accommodation'
                           const ItemIcon = item.kind === 'activity' ? Ticket : item.kind === 'transport' ? Plane : Hotel
-                          const showCost = item.data.total_cost_eur != null && item.data.status !== 'confirmado'
+                          const showCost = Number(item.data.total_cost_eur) > 0 && item.data.status !== 'confirmado'
                           const mapsUrl = mapsUrlFor(item)
+
+                          // Passeios sem horário exato, do mesmo turno: podem ser
+                          // reordenados com as setinhas (só dentro do turno).
+                          const orderGroup =
+                            item.kind === 'activity' && !item.data.exact_time && item.data.shift
+                              ? realItems.filter(
+                                  (i) =>
+                                    i.kind === 'activity' && !i.data.exact_time && i.data.shift === item.data.shift
+                                )
+                              : []
+                          const orderPos = orderGroup.findIndex((i) => i.data.id === item.data.id)
 
                           // Monta a linha de detalhes sem nunca deixar um
                           // travessão de campo vazio — só entra o que existir.
@@ -3173,13 +3221,37 @@ function Dashboard({ session }) {
                                       )
                                     }
                                   />
-                                  <button
-                                    onClick={() => setEditingItem({ kind: item.kind, data: item.data })}
-                                    aria-label="Editar"
-                                    className="rounded-full p-1 text-muted-foreground hover:bg-muted"
-                                  >
-                                    <Pencil className="h-3.5 w-3.5" />
-                                  </button>
+                                  <div className="flex items-center gap-0.5">
+                                    {orderGroup.length > 1 && (
+                                      <div className="flex flex-col">
+                                        <button
+                                          type="button"
+                                          onClick={() => handleMoveActivity(orderGroup, orderPos, -1)}
+                                          disabled={orderPos <= 0}
+                                          aria-label="Mover para cima"
+                                          className="rounded p-0.5 text-muted-foreground/60 hover:text-foreground disabled:opacity-20"
+                                        >
+                                          <ChevronUp className="h-3 w-3" />
+                                        </button>
+                                        <button
+                                          type="button"
+                                          onClick={() => handleMoveActivity(orderGroup, orderPos, 1)}
+                                          disabled={orderPos >= orderGroup.length - 1}
+                                          aria-label="Mover para baixo"
+                                          className="rounded p-0.5 text-muted-foreground/60 hover:text-foreground disabled:opacity-20"
+                                        >
+                                          <ChevronDown className="h-3 w-3" />
+                                        </button>
+                                      </div>
+                                    )}
+                                    <button
+                                      onClick={() => setEditingItem({ kind: item.kind, data: item.data })}
+                                      aria-label="Editar"
+                                      className="rounded-full p-1 text-muted-foreground hover:bg-muted"
+                                    >
+                                      <Pencil className="h-3.5 w-3.5" />
+                                    </button>
+                                  </div>
                                 </div>
                               </div>
                               )}
