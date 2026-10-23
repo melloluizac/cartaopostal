@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Loader2, RefreshCw, Plane, Droplets, Thermometer } from 'lucide-react'
 
 // ---------------------------------------------------------------------------
@@ -435,6 +435,18 @@ export default function WeatherTab({ destinations, accommodations, activities, t
   const [baseDay, setBaseDay] = useState(null)
   const [changesByKey, setChangesByKey] = useState({})
   const [selected, setSelected] = useState(null)
+  // Barra de rolagem extra no topo do calendário, sincronizada com a de baixo.
+  const topScrollRef = useRef(null)
+  const bodyScrollRef = useRef(null)
+  const syncing = useRef(false)
+  const syncScroll = (from, to) => {
+    if (syncing.current || !from.current || !to.current) return
+    syncing.current = true
+    to.current.scrollLeft = from.current.scrollLeft
+    requestAnimationFrame(() => {
+      syncing.current = false
+    })
+  }
 
   const days = useMemo(
     () => deriveDays({ destinations, accommodations, activities, transport }),
@@ -588,8 +600,6 @@ export default function WeatherTab({ destinations, accommodations, activities, t
     return rows.sort((a, b) => a.date.localeCompare(b.date))
   }, [days, changesByKey])
 
-  const selectedInfo = selected ? weather[selected.key] : null
-
   if (!tripDates.length) {
     return (
       <p className="rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
@@ -680,7 +690,20 @@ export default function WeatherTab({ destinations, accommodations, activities, t
       </section>
 
       {/* Calendário semanal (rola de lado no celular) */}
-      <div className="-mx-4 overflow-x-auto px-4 pb-2">
+      <div
+        ref={topScrollRef}
+        onScroll={() => syncScroll(topScrollRef, bodyScrollRef)}
+        className="-mx-4 overflow-x-auto px-4"
+        style={{ scrollbarWidth: 'thin' }}
+        aria-hidden="true"
+      >
+        <div className="h-2 min-w-[700px]" />
+      </div>
+      <div
+        ref={bodyScrollRef}
+        onScroll={() => syncScroll(bodyScrollRef, topScrollRef)}
+        className="-mx-4 overflow-x-auto px-4 pb-2"
+      >
         <div className="min-w-[700px]">
           <div className="grid grid-cols-7 gap-1">
             {WEEKDAYS.map((w) => (
@@ -766,12 +789,45 @@ export default function WeatherTab({ destinations, accommodations, activities, t
                                     </span>
                                   )}
                                   {w.src === 'prev' ? (
-                                    <span className="block text-[8px] opacity-80">
+                                    <span
+                                      className="block text-[8px] opacity-80"
+                                      title="Chance de chuva: M = manhã, T = tarde, N = noite"
+                                    >
                                       M{w.m ?? '–'} T{w.t ?? '–'} N{w.n ?? '–'}
                                     </span>
                                   ) : (
                                     <span className="block text-[8px] opacity-80">
                                       {w.src === 'trend' ? 'tendência ECMWF' : 'média histórica'}
+                                    </span>
+                                  )}
+                                  {isSel && (
+                                    <span
+                                      className="mt-1 block pt-1 text-[9px] leading-snug"
+                                      style={{ borderTop: '1px solid rgba(128,128,128,0.35)' }}
+                                    >
+                                      <span className="block">
+                                        {w.icon} {w.desc}
+                                      </span>
+                                      <span className="block">
+                                        chuva {w.prob}% · {w.mm} mm
+                                      </span>
+                                      <span className="block">
+                                        mín {w.min}° · máx {w.max}°
+                                      </span>
+                                      {w.src === 'prev' && (
+                                        <>
+                                          <span className="block">manhã {w.m ?? '–'}%</span>
+                                          <span className="block">tarde {w.t ?? '–'}%</span>
+                                          <span className="block">noite {w.n ?? '–'}%</span>
+                                        </>
+                                      )}
+                                      {ch && !ch.entered && (
+                                        <span className="mt-0.5 block font-semibold" style={{ color: w.prob >= 70 ? '#ffe39a' : '#8a6a00' }}>
+                                          {ch.changes.join(', ')}
+                                          {baseDay ? ` (base ${fmtDM(baseDay)})` : ''}
+                                        </span>
+                                      )}
+                                      <span className="mt-0.5 block opacity-80">{CONF_TEXT[w.conf]}</span>
                                     </span>
                                   )}
                                 </>
@@ -792,34 +848,6 @@ export default function WeatherTab({ destinations, accommodations, activities, t
           </div>
         </div>
       </div>
-
-      {/* Resumo completo do card tocado */}
-      {selected && selectedInfo && (
-        <section className="rounded-xl border border-border bg-card p-3 font-mono text-[11px] text-foreground">
-          <p className="font-semibold">
-            {selected.city} · {fmtDM(selected.date)}
-            {selected.role ? ` · ${selected.role}` : ''}
-          </p>
-          <p className="mt-1">
-            {selectedInfo.icon} {selectedInfo.desc} · chuva {selectedInfo.prob}% ({selectedInfo.mm} mm)
-          </p>
-          <p>
-            mín {selectedInfo.min}° · máx {selectedInfo.max}°
-          </p>
-          {selectedInfo.src === 'prev' && (
-            <p>
-              manhã {selectedInfo.m ?? '–'}% · tarde {selectedInfo.t ?? '–'}% · noite {selectedInfo.n ?? '–'}%
-            </p>
-          )}
-          {changesByKey[selected.key] && !changesByKey[selected.key].entered && (
-            <p className="text-[#8a6a00]">
-              {changesByKey[selected.key].changes.join(', ')}
-              {baseDay ? ` (base ${fmtDM(baseDay)})` : ''}
-            </p>
-          )}
-          <p className="mt-1 text-muted-foreground">{CONF_TEXT[selectedInfo.conf]}</p>
-        </section>
-      )}
 
       <p className="font-mono text-[10px] text-muted-foreground">
         Cidades e datas vêm do Roteiro. Dados: Open-Meteo (previsão diária, tendência ECMWF EC46 e média histórica
