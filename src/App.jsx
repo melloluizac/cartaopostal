@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from 'react'
+import { Fragment, createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { supabase } from './lib/supabaseClient'
 import {
   Stamp,
@@ -391,6 +391,72 @@ const FIELD_WIDTH_CLASS = {
   '1/2': 'w-1/2',
 }
 
+// Campo de dinheiro: mostra "R$ 1.234,56" (formato pt-BR) na MOEDA que a pessoa
+// escolheu ao criar a viagem. Internamente o app guarda tudo em euro
+// (total_cost_eur), então o campo converte na entrada e na saída usando a
+// cotação base da viagem: o valor que sobe pro formulário continua sendo euro,
+// texto com ponto decimal ("1234.56"), que é o que o resto do app espera.
+const MoneyContext = createContext({ currency: 'EUR', rate: 1, symbol: '€' })
+
+const moneyFmt = (v) =>
+  v === '' || v == null || Number.isNaN(Number(v))
+    ? ''
+    : Number(v).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+// Tax return só vale pra categoria "Compras"; fora dela, zera os dois campos.
+function taxReturnFields(form) {
+  const on = form.category === 'Compras' && !!form.tax_return
+  const pct = Number(form.tax_return_pct)
+  return {
+    tax_return: on,
+    tax_return_pct: on && form.tax_return_pct !== '' && !Number.isNaN(pct) ? pct : null,
+  }
+}
+
+function MoneyInput({ value, onChange, required }) {
+  const { rate, symbol } = useContext(MoneyContext)
+  const shown = value === '' || value == null ? '' : Number(value) * rate // na moeda da viagem
+  const [focused, setFocused] = useState(false)
+  const [text, setText] = useState(() => moneyFmt(shown))
+
+  useEffect(() => {
+    if (!focused) setText(moneyFmt(shown))
+  }, [shown, focused])
+
+  function handleChange(e) {
+    // só dígitos e UMA vírgula/ponto, no máx. 2 casas decimais
+    let raw = e.target.value.replace(/[^\d.,]/g, '').replace('.', ',')
+    const [int = '', ...rest] = raw.split(',')
+    raw = rest.length ? `${int},${rest.join('').slice(0, 2)}` : int
+    setText(raw)
+    const typed = Number(raw.replace(',', '.'))
+    onChange(raw === '' || Number.isNaN(typed) ? '' : String(Number((typed / rate).toFixed(4))))
+  }
+
+  return (
+    <div className="relative">
+      <span className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 font-mono text-sm text-muted-foreground">
+        {symbol}
+      </span>
+      <input
+        type="text"
+        inputMode="decimal"
+        value={text}
+        required={required}
+        placeholder="0,00"
+        onFocus={() => {
+          setFocused(true)
+          setText(shown === '' ? '' : String(Number(shown.toFixed(2))).replace('.', ','))
+        }}
+        onBlur={() => setFocused(false)}
+        style={{ paddingLeft: `${Math.max(symbol.length, 1) * 0.6 + 1.1}rem` }}
+        onChange={handleChange}
+        className="w-full rounded-lg border border-input bg-background py-2 pr-3 font-mono text-sm text-foreground outline-none ring-primary/40 focus:ring-2"
+      />
+    </div>
+  )
+}
+
 function QuickAddSheet({ title, icon: Icon, fields, initialValues, onSubmit, onDelete, onClose }) {
   const initial = useMemo(
     () => Object.fromEntries(fields.map((f) => [f.name, initialValues?.[f.name] ?? f.default ?? ''])),
@@ -577,6 +643,8 @@ function QuickAddSheet({ title, icon: Icon, fields, initialValues, onSubmit, onD
               )
             })}
           </select>
+        ) : f.type === 'money' ? (
+          <MoneyInput value={form[f.name]} required={f.required} onChange={(v) => setField(f.name, v)} />
         ) : f.type === 'textarea' ? (
           <textarea
             value={form[f.name]}
@@ -1352,12 +1420,19 @@ function Dashboard({ session }) {
   // cada um só mexe no seu). Categorias deixadas em branco no formulário
   // simplesmente não são tocadas (não apaga um limite já salvo por engano).
   async function handleSaveBudgets(form) {
-    const rows = EXPENSE_CATEGORIES.filter((c) => form[`limit_${c}`]).map((c) => ({
-      trip_id: trip.id,
-      traveler_name: currentTravelerName,
-      category: c,
-      limit_amount: Number(form[`limit_${c}`]),
-    }))
+    // Com "aplicar a todos", grava os mesmos limites pra cada viajante da
+    // viagem (substitui o limite que eles já tinham nessas categorias).
+    const names = form.apply_to_all
+      ? Array.from(new Set([currentTravelerName, ...travelers.map((t) => t.name)]))
+      : [currentTravelerName]
+    const rows = names.flatMap((name) =>
+      EXPENSE_CATEGORIES.filter((c) => form[`limit_${c}`]).map((c) => ({
+        trip_id: trip.id,
+        traveler_name: name,
+        category: c,
+        limit_amount: Number(form[`limit_${c}`]),
+      }))
+    )
     if (rows.length === 0) return
     const { error } = await supabase
       .from('trip_budgets')
@@ -1900,6 +1975,7 @@ function Dashboard({ session }) {
       paid_by: paidBy,
       split_type: splitType,
       notes: form.notes || null,
+      ...taxReturnFields(form),
       // Gasto lançado direto (sem passeio/transporte/hospedagem de origem)
       // já nasce "confirmado" — é dinheiro que já saiu do bolso na hora.
       status: 'confirmado',
@@ -1955,6 +2031,7 @@ function Dashboard({ session }) {
         split_type: splitType,
         category: form.category || null,
         notes: form.notes || null,
+        ...taxReturnFields(form),
         status: form.status || 'confirmado',
       })
       .eq('id', id)
@@ -2549,6 +2626,19 @@ function Dashboard({ session }) {
     return expense.paid_by === personName ? cost : 0
   }
 
+  // Valor esperado de tax return: soma, nas compras marcadas "Com Tax Return",
+  // do % aproximado × valor da compra. É só informativo, não entra no total.
+  const expectedTaxReturn = useMemo(
+    () =>
+      statusFilteredExpenses.reduce((sum, e) => {
+        if (e.category !== 'Compras' || !e.tax_return || !(Number(e.tax_return_pct) > 0)) return sum
+        const amount = gastosUserFilter === 'Todos' ? Number(e.total_cost_eur) || 0 : personShareOf(e, gastosUserFilter)
+        return sum + (amount * Number(e.tax_return_pct)) / 100
+      }, 0),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [statusFilteredExpenses, gastosUserFilter, travelers]
+  )
+
   const grandTotal = useMemo(() => {
     if (gastosUserFilter === 'Todos') {
       return statusFilteredExpenses.reduce((sum, e) => sum + (Number(e.total_cost_eur) || 0), 0)
@@ -2723,7 +2813,25 @@ function Dashboard({ session }) {
 
   const activeDest = destinations.find((d) => d.id === activeDestId)
 
+  // Moeda de entrada dos campos de valor = moeda escolhida ao criar a viagem.
+  const moneyCfg = (() => {
+    const currency = trip?.currency || 'EUR'
+    const rate = Number(trip?.base_euro_rate)
+    if (currency === 'EUR' || !rate) return { currency: 'EUR', rate: 1, symbol: '€' }
+    let symbol = currency
+    try {
+      symbol =
+        new Intl.NumberFormat('pt-BR', { style: 'currency', currency })
+          .formatToParts(0)
+          .find((p) => p.type === 'currency')?.value ?? currency
+    } catch {
+      // código de moeda inválido: usa o próprio código
+    }
+    return { currency, rate, symbol }
+  })()
+
   return (
+    <MoneyContext.Provider value={moneyCfg}>
     <div className="min-h-screen bg-background pb-24">
       {/* Header comum às 3 telas */}
       <header className="sticky top-0 z-10 border-b border-border bg-card/95 px-6 py-3 backdrop-blur sm:px-8">
@@ -3351,6 +3459,11 @@ function Dashboard({ session }) {
                       {grandTotal > totalBudget && ' (estourado)'}
                     </p>
                   )}
+                  {expectedTaxReturn > 0 && (
+                    <p className="mt-1 font-mono text-[10px] text-muted-foreground">
+                      valor esperado de tax return · {formatMoney(expectedTaxReturn)}
+                    </p>
+                  )}
                 </div>
                 <div className="flex w-40 flex-col gap-1">
                   <label className="flex items-center gap-1.5 font-mono text-[10px] text-foreground">
@@ -3767,7 +3880,7 @@ function Dashboard({ session }) {
               // dois viram redundantes.
               hideWhen: (values) => !!values.exact_time,
             },
-            { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
+            { name: 'total_cost_eur', label: 'Valor Total', type: 'money', row: 'money', width: '1/3' },
             {
               name: 'responsavel',
               label: 'Quem Pagou',
@@ -3819,7 +3932,7 @@ function Dashboard({ session }) {
               default: 'planejando',
               variant: 'status-pill',
             },
-            { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
+            { name: 'total_cost_eur', label: 'Valor Total', type: 'money', row: 'money', width: '1/3' },
             {
               name: 'responsavel',
               label: 'Quem Pagou',
@@ -3874,7 +3987,7 @@ function Dashboard({ session }) {
             { name: 'hotel_name', label: 'Nome do hotel', required: true },
             { name: 'check_in', label: 'Check-in', type: 'date' },
             { name: 'check_out', label: 'Check-out', type: 'date' },
-            { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
+            { name: 'total_cost_eur', label: 'Valor Total', type: 'money', row: 'money', width: '1/3' },
             {
               name: 'responsavel',
               label: 'Quem Pagou',
@@ -3941,7 +4054,7 @@ function Dashboard({ session }) {
               options: ['Manhã', 'Tarde', 'Noite'],
               hideWhen: (values) => !!values.exact_time,
             },
-            { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
+            { name: 'total_cost_eur', label: 'Valor Total', type: 'money', row: 'money', width: '1/3' },
             {
               name: 'responsavel',
               label: 'Quem Pagou',
@@ -3992,7 +4105,7 @@ function Dashboard({ session }) {
               options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
               variant: 'status-pill',
             },
-            { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
+            { name: 'total_cost_eur', label: 'Valor Total', type: 'money', row: 'money', width: '1/3' },
             {
               name: 'responsavel',
               label: 'Quem Pagou',
@@ -4048,7 +4161,7 @@ function Dashboard({ session }) {
             { name: 'hotel_name', label: 'Nome do hotel', required: true },
             { name: 'check_in', label: 'Check-in', type: 'date' },
             { name: 'check_out', label: 'Check-out', type: 'date' },
-            { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
+            { name: 'total_cost_eur', label: 'Valor Total', type: 'money', row: 'money', width: '1/3' },
             {
               name: 'responsavel',
               label: 'Quem Pagou',
@@ -4081,7 +4194,7 @@ function Dashboard({ session }) {
             { name: 'description', label: 'Descrição', required: true, suggestions: expenseSuggestions },
             { name: 'transaction_date', label: 'Data', type: 'date', default: todayIso() },
             { name: 'category', label: 'Categoria', type: 'select', options: EXPENSE_CATEGORIES },
-            { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
+            { name: 'total_cost_eur', label: 'Valor Total', type: 'money', row: 'money', width: '1/3' },
             {
               name: 'responsavel',
               label: 'Quem Pagou',
@@ -4097,6 +4210,19 @@ function Dashboard({ session }) {
               type: 'checkbox',
               default: false,
               hideWhen: (values) => values.responsavel !== 'individual',
+            },
+            {
+              name: 'tax_return',
+              label: 'Com Tax Return',
+              type: 'checkbox',
+              default: false,
+              hideWhen: (values) => values.category !== 'Compras',
+            },
+            {
+              name: 'tax_return_pct',
+              label: '% aproximado de tax return',
+              type: 'number',
+              hideWhen: (values) => !(values.category === 'Compras' && values.tax_return),
             },
             { name: 'notes', label: 'Notas', type: 'textarea' },
           ]}
@@ -4243,8 +4369,15 @@ function Dashboard({ session }) {
           fields={EXPENSE_CATEGORIES.map((c) => ({
             name: `limit_${c}`,
             label: `Limite — ${c}`,
-            type: 'number',
-          }))}
+            type: 'money',
+          })).concat([
+            {
+              name: 'apply_to_all',
+              label: 'Aplicar este orçamento a todos os viajantes',
+              type: 'checkbox',
+              default: false,
+            },
+          ])}
         />
       )}
 
@@ -4302,7 +4435,7 @@ function Dashboard({ session }) {
           fields={[
             { name: 'description', label: 'Nome', required: true },
             { name: 'transaction_date', label: 'Data', type: 'date' },
-            { name: 'total_cost_eur', label: 'Valor Total', type: 'number', row: 'money', width: '1/3' },
+            { name: 'total_cost_eur', label: 'Valor Total', type: 'money', row: 'money', width: '1/3' },
             {
               name: 'responsavel',
               label: 'Quem Pagou',
@@ -4326,11 +4459,25 @@ function Dashboard({ session }) {
               options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
               variant: 'status-pill',
             },
+            {
+              name: 'tax_return',
+              label: 'Com Tax Return',
+              type: 'checkbox',
+              default: false,
+              hideWhen: (values) => values.category !== 'Compras',
+            },
+            {
+              name: 'tax_return_pct',
+              label: '% aproximado de tax return',
+              type: 'number',
+              hideWhen: (values) => !(values.category === 'Compras' && values.tax_return),
+            },
             { name: 'notes', label: 'Notas', type: 'textarea' },
           ]}
         />
       )}
     </div>
+    </MoneyContext.Provider>
   )
 }
 

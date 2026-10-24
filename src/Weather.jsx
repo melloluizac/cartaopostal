@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Loader2, RefreshCw, Plane, Droplets, Thermometer } from 'lucide-react'
+import { Loader2, RefreshCw, Plane, Droplets, Thermometer, ChevronDown, ChevronUp } from 'lucide-react'
 
 // ---------------------------------------------------------------------------
 // Aba "Clima" — regras em "Regras do Clima do Roteiro":
@@ -212,21 +212,48 @@ async function fetchForecast({ lat, lon }) {
   const json = await getJson(
     `https://api.open-meteo.com/v1/forecast?latitude=${lat}&longitude=${lon}` +
       `&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max,precipitation_sum` +
-      `&hourly=precipitation_probability&forecast_days=16&timezone=auto`
+      `&hourly=precipitation_probability,weather_code,temperature_2m&forecast_days=16&timezone=auto`
   )
   if (!json?.daily?.time) return null
   const hourly = {}
   const ht = json.hourly?.time ?? []
   const hp = json.hourly?.precipitation_probability ?? []
+  const hc = json.hourly?.weather_code ?? []
+  const hT = json.hourly?.temperature_2m ?? []
+  const acc = {} // date -> slot -> { probs, temps, codes }
   ht.forEach((t, i) => {
     const date = t.slice(0, 10)
     const hour = Number(t.slice(11, 13))
-    if (hp[i] == null) return
     const slot = hour >= 6 && hour < 12 ? 'm' : hour >= 12 && hour < 18 ? 't' : hour >= 18 ? 'n' : null
     if (!slot) return
-    hourly[date] = hourly[date] || { m: null, t: null, n: null }
-    hourly[date][slot] = Math.max(hourly[date][slot] ?? 0, hp[i])
+    acc[date] = acc[date] || {}
+    acc[date][slot] = acc[date][slot] || { probs: [], temps: [], codes: [] }
+    if (hp[i] != null) acc[date][slot].probs.push(hp[i])
+    if (hT[i] != null) acc[date][slot].temps.push(hT[i])
+    if (hc[i] != null) acc[date][slot].codes.push(hc[i])
   })
+  const modeOf = (arr) => {
+    const count = {}
+    let best = null
+    for (const v of arr) {
+      count[v] = (count[v] || 0) + 1
+      if (best == null || count[v] > count[best]) best = v
+    }
+    return best
+  }
+  for (const [date, slots] of Object.entries(acc)) {
+    hourly[date] = { m: null, t: null, n: null, periods: {} }
+    for (const slot of ['m', 't', 'n']) {
+      const x = slots[slot]
+      if (!x) continue
+      hourly[date][slot] = x.probs.length ? Math.max(...x.probs) : null
+      hourly[date].periods[slot] = {
+        prob: hourly[date][slot],
+        temp: x.temps.length ? Math.round(x.temps.reduce((a, v) => a + v, 0) / x.temps.length) : null,
+        code: modeOf(x.codes),
+      }
+    }
+  }
   const byDate = {}
   json.daily.time.forEach((date, i) => {
     const prob = json.daily.precipitation_probability_max?.[i]
@@ -237,7 +264,7 @@ async function fetchForecast({ lat, lon }) {
       prob,
       mm: json.daily.precipitation_sum?.[i] ?? 0,
       code: json.daily.weather_code?.[i],
-      ...(hourly[date] ?? { m: null, t: null, n: null }),
+      ...(hourly[date] ?? { m: null, t: null, n: null, periods: {} }),
     }
   })
   return byDate
@@ -326,6 +353,7 @@ function buildReading({ date, today, forecast, trend, clim }) {
       m: f.m,
       t: f.t,
       n: f.n,
+      periods: f.periods,
       icon: icon.emoji,
       desc: icon.label,
       code: f.code,
@@ -435,6 +463,7 @@ export default function WeatherTab({ destinations, accommodations, activities, t
   const [baseDay, setBaseDay] = useState(null)
   const [changesByKey, setChangesByKey] = useState({})
   const [selected, setSelected] = useState(null)
+  const [changesOpen, setChangesOpen] = useState(false) // "Mudanças" começa recolhida
   // Barra de rolagem extra no topo do calendário, sincronizada com a de baixo.
   const topScrollRef = useRef(null)
   const bodyScrollRef = useRef(null)
@@ -479,7 +508,7 @@ export default function WeatherTab({ destinations, accommodations, activities, t
     const today = toIso(new Date())
     const hist0 = lsGet(LS_HIST) || []
     const saved = hist0.find((h) => h.day === today)
-    if (!force && saved && !saved.partial && saved.sig === citiesSignature && Object.keys(saved.data).length) {
+    if (!force && saved && !saved.partial && saved.v === 2 && saved.sig === citiesSignature && Object.keys(saved.data).length) {
       const base0 = [...hist0].reverse().find((h) => h.day < today)
       const changes0 = {}
       if (base0) {
@@ -555,7 +584,7 @@ export default function WeatherTab({ destinations, accommodations, activities, t
 
     // leituras do mesmo dia se substituem
     const next = hist.filter((h) => h.day !== today)
-    next.push({ day: today, data: out, sig: citiesSignature, at: Date.now(), partial: failed.length > 0 })
+    next.push({ day: today, data: out, sig: citiesSignature, v: 2, at: Date.now(), partial: failed.length > 0 })
     lsSet(LS_HIST, next.slice(-MAX_HIST))
 
     const msgs = []
@@ -632,10 +661,25 @@ export default function WeatherTab({ destinations, accommodations, activities, t
 
       {/* Mudanças desde a leitura de um dia anterior */}
       <section aria-labelledby="mudancas-heading" className="rounded-xl border border-border bg-card p-3">
-        <h3 id="mudancas-heading" className="font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
-          Mudanças desde a leitura anterior
+        <h3 id="mudancas-heading" className="m-0">
+          <button
+            type="button"
+            onClick={() => setChangesOpen((v) => !v)}
+            aria-expanded={changesOpen}
+            className="flex w-full items-center justify-between gap-2 font-mono text-[10px] uppercase tracking-wide text-muted-foreground"
+          >
+            <span>
+              Mudanças desde a leitura anterior
+              {baseDay && changeList.length > 0 ? ` · ${changeList.length}` : ''}
+            </span>
+            {changesOpen ? (
+              <ChevronUp className="h-3.5 w-3.5" aria-hidden="true" />
+            ) : (
+              <ChevronDown className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+          </button>
         </h3>
-        {!baseDay ? (
+        {!changesOpen ? null : !baseDay ? (
           <p className="mt-1 font-mono text-[11px] text-muted-foreground">
             Primeira leitura salva. As mudanças aparecem a partir da próxima leitura em outro dia.
           </p>
@@ -673,6 +717,10 @@ export default function WeatherTab({ destinations, accommodations, activities, t
             </span>
           ))}
           <span>chance de chuva</span>
+          <span className="flex items-center gap-1">
+            <span className="h-3 w-3 rounded-sm" style={{ border: '2px solid #d9a521' }} />
+            mudou desde a leitura anterior
+          </span>
         </div>
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           {[
@@ -762,7 +810,6 @@ export default function WeatherTab({ destinations, accommodations, activities, t
                                 {w && <span className="inline-block h-2 w-2 shrink-0 rounded-full" style={CONF_DOT[w.conf]} />}
                                 <span className="truncate text-[10px] font-semibold">{city}</span>
                               </span>
-                              {role && <span className="block text-[8px] uppercase opacity-70">{role}</span>}
                               {w ? (
                                 <>
                                   <span className="mt-0.5 flex items-center justify-between text-[10px]">
@@ -783,51 +830,38 @@ export default function WeatherTab({ destinations, accommodations, activities, t
                                       {w.max}°
                                     </span>
                                   </span>
-                                  {ch && (
-                                    <span className="block text-[8px] font-semibold uppercase" style={{ color: w.prob >= 70 ? '#ffe39a' : '#8a6a00' }}>
-                                      mudou
-                                    </span>
-                                  )}
-                                  {w.src === 'prev' ? (
-                                    <span
-                                      className="block text-[8px] opacity-80"
-                                      title="Chance de chuva: M = manhã, T = tarde, N = noite"
-                                    >
-                                      M{w.m ?? '–'} T{w.t ?? '–'} N{w.n ?? '–'}
-                                    </span>
-                                  ) : (
+                                  {w.src !== 'prev' && (
                                     <span className="block text-[8px] opacity-80">
                                       {w.src === 'trend' ? 'tendência ECMWF' : 'média histórica'}
                                     </span>
                                   )}
                                   {isSel && (
                                     <span
-                                      className="mt-1 block pt-1 text-[9px] leading-snug"
+                                      className="mt-1 block pt-1 text-[10px] leading-snug"
                                       style={{ borderTop: '1px solid rgba(128,128,128,0.35)' }}
                                     >
-                                      <span className="block">
-                                        {w.icon} {w.desc}
-                                      </span>
-                                      <span className="block">
-                                        chuva {w.prob}% · {w.mm} mm
-                                      </span>
-                                      <span className="block">
-                                        mín {w.min}° · máx {w.max}°
-                                      </span>
-                                      {w.src === 'prev' && (
-                                        <>
-                                          <span className="block">manhã {w.m ?? '–'}%</span>
-                                          <span className="block">tarde {w.t ?? '–'}%</span>
-                                          <span className="block">noite {w.n ?? '–'}%</span>
-                                        </>
+                                      {w.src === 'prev' && w.periods && Object.keys(w.periods).length > 0 ? (
+                                        [['m', 'manhã'], ['t', 'tarde'], ['n', 'noite']].map(([k, label]) => {
+                                          const p = w.periods[k]
+                                          if (!p) return null
+                                          const ic = p.code != null ? iconFromWmo(p.code).emoji : ''
+                                          return (
+                                            <span key={k} className="mb-1 block">
+                                              <span className="block font-semibold">{label}</span>
+                                              <span className="flex items-center justify-between gap-1">
+                                                <span>{ic}</span>
+                                                <span className="flex items-center gap-0.5">
+                                                  <Droplets className="h-2.5 w-2.5 opacity-60" aria-hidden="true" />
+                                                  {p.prob ?? '–'}%
+                                                </span>
+                                                <span>{p.temp != null ? `${p.temp}°` : '–'}</span>
+                                              </span>
+                                            </span>
+                                          )
+                                        })
+                                      ) : (
+                                        <span className="block opacity-80">Sem detalhe por turno para este dia.</span>
                                       )}
-                                      {ch && !ch.entered && (
-                                        <span className="mt-0.5 block font-semibold" style={{ color: w.prob >= 70 ? '#ffe39a' : '#8a6a00' }}>
-                                          {ch.changes.join(', ')}
-                                          {baseDay ? ` (base ${fmtDM(baseDay)})` : ''}
-                                        </span>
-                                      )}
-                                      <span className="mt-0.5 block opacity-80">{CONF_TEXT[w.conf]}</span>
                                     </span>
                                   )}
                                 </>
