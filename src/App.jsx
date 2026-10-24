@@ -1420,13 +1420,11 @@ function Dashboard({ session }) {
   // cada um só mexe no seu). Categorias deixadas em branco no formulário
   // simplesmente não são tocadas (não apaga um limite já salvo por engano).
   async function handleSaveBudgets(form) {
-    // Com "aplicar a todos", grava os mesmos limites pra cada viajante da
-    // viagem (substitui o limite que eles já tinham nessas categorias).
-    const names = form.apply_to_all
-      ? Array.from(new Set([currentTravelerName, ...travelers.map((t) => t.name)]))
-      : [currentTravelerName]
-    const rows = names.flatMap((name) =>
-      EXPENSE_CATEGORIES.filter((c) => form[`limit_${c}`]).map((c) => ({
+    // Em cada categoria marcada com "aplicar a todos", grava o mesmo limite pra
+    // cada viajante da viagem (substitui o limite que eles já tinham nela).
+    const everyone = Array.from(new Set([currentTravelerName, ...travelers.map((t) => t.name)]))
+    const rows = EXPENSE_CATEGORIES.filter((c) => form[`limit_${c}`]).flatMap((c) =>
+      (form[`apply_${c}`] ? everyone : [currentTravelerName]).map((name) => ({
         trip_id: trip.id,
         traveler_name: name,
         category: c,
@@ -4366,14 +4364,12 @@ function Dashboard({ session }) {
               budgetsByUserCategory[`${currentTravelerName}::${c}`] ?? '',
             ])
           )}
-          fields={EXPENSE_CATEGORIES.map((c) => ({
-            name: `limit_${c}`,
-            label: `Limite — ${c}`,
-            type: 'money',
-          })).concat([
+          fields={EXPENSE_CATEGORIES.flatMap((c) => [
+            { name: `limit_${c}`, label: `Limite — ${c}`, type: 'money' },
+            // cada categoria decide sozinha se vale pra todos os viajantes
             {
-              name: 'apply_to_all',
-              label: 'Aplicar este orçamento a todos os viajantes',
+              name: `apply_${c}`,
+              label: 'Aplicar a todos os viajantes',
               type: 'checkbox',
               default: false,
             },
