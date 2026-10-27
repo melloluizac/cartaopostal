@@ -103,6 +103,16 @@ const STATUS_ORDER = ['confirmado', 'pendente', 'atrasado', 'planejando']
 // de um item às 16:30, por exemplo.
 const SHIFT_SORT_TIME = { Manhã: '08:00', Tarde: '13:00', Noite: '19:00' }
 
+// Turno efetivo de um passeio: o turno cadastrado ou, havendo horário exato, o
+// turno em que esse horário cai (antes das 12h manhã, até 18h tarde, depois noite).
+function activityBucket(a) {
+  if (a.exact_time) {
+    const h = Number(String(a.exact_time).slice(0, 2))
+    return h < 12 ? 'Manhã' : h < 18 ? 'Tarde' : 'Noite'
+  }
+  return a.shift && SHIFT_SORT_TIME[a.shift] ? a.shift : null
+}
+
 // Cores sólidas (não dá pra usar opacidade/tailwind em <option>, precisa de
 // hex de verdade) usadas só no filtro de status da tela de Roteiro.
 const STATUS_OPTION_COLORS = {
@@ -2509,7 +2519,16 @@ function Dashboard({ session }) {
       .map(([date, items]) => ({
         date,
         items: items.sort((a, b) => {
-          const byKey = (timelineSortKey(a) ?? '99:99').localeCompare(timelineSortKey(b) ?? '99:99')
+          // Passeio com ordem manual (day_order) vale pelo turno dele, não pelo
+          // horário: assim dá pra encaixar um passeio com hora entre os do mesmo turno.
+          const effKey = (it) => {
+            if (it.kind === 'activity' && it.data.day_order != null) {
+              const bucket = activityBucket(it.data)
+              if (bucket) return SHIFT_SORT_TIME[bucket]
+            }
+            return timelineSortKey(it) ?? '99:99'
+          }
+          const byKey = effKey(a).localeCompare(effKey(b))
           if (byKey !== 0) return byKey
           // empate (ex.: vários passeios só com o mesmo turno): vale a ordem
           // escolhida na mão (day_order); sem ordem, vão pro fim, na ordem original.
@@ -3168,15 +3187,14 @@ function Dashboard({ session }) {
                           const showCost = Number(item.data.total_cost_eur) > 0 && item.data.status !== 'confirmado'
                           const mapsUrl = mapsUrlFor(item)
 
-                          // Passeios sem horário exato, do mesmo turno: podem ser
-                          // reordenados com as setinhas (só dentro do turno).
-                          const orderGroup =
-                            item.kind === 'activity' && !item.data.exact_time && item.data.shift
-                              ? realItems.filter(
-                                  (i) =>
-                                    i.kind === 'activity' && !i.data.exact_time && i.data.shift === item.data.shift
-                                )
-                              : []
+                          // Passeios do mesmo turno (com ou sem horário exato) podem ser
+                          // reordenados com as setinhas, só dentro do turno.
+                          const itemBucket = item.kind === 'activity' ? activityBucket(item.data) : null
+                          const orderGroup = itemBucket
+                            ? realItems.filter(
+                                (i) => i.kind === 'activity' && activityBucket(i.data) === itemBucket
+                              )
+                            : []
                           const orderPos = orderGroup.findIndex((i) => i.data.id === item.data.id)
 
                           // Monta a linha de detalhes sem nunca deixar um
@@ -3296,7 +3314,7 @@ function Dashboard({ session }) {
                                           Como chegar
                                         </a>
                                       )}
-                                      {item.kind === 'activity' && item.data.ticket_url && (
+                                      {item.kind === 'activity' && item.data.ticket_url && item.data.status !== 'confirmado' && (
                                         <a
                                           href={item.data.ticket_url}
                                           target="_blank"
