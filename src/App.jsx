@@ -1,4 +1,4 @@
-import { Fragment, createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { Fragment, createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import { supabase } from './lib/supabaseClient'
 import {
   Stamp,
@@ -21,6 +21,7 @@ import {
   Hotel,
   ChevronDown,
   ChevronUp,
+  ChevronRight,
   ClipboardList,
   Link2,
   Copy,
@@ -48,6 +49,17 @@ const formatDate = (iso) => {
     day: '2-digit',
     month: 'short',
   })
+}
+
+// Dia da semana abreviado ("qua") de uma data ISO, sem depender do locale.
+const WEEKDAY_SHORT = ['dom', 'seg', 'ter', 'qua', 'qui', 'sex', 'sáb']
+const weekdayShort = (iso) => (iso ? WEEKDAY_SHORT[new Date(`${iso}T00:00:00`).getDay()] : '')
+
+// Data de hoje no fuso do aparelho (YYYY-MM-DD). Não usar toISOString(): ele é UTC
+// e, à noite no Brasil, já cai no dia seguinte.
+const localTodayIso = () => {
+  const d = new Date()
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
 // Gera o link de busca do Google Maps (formato oficial /maps/search) a
@@ -1105,14 +1117,8 @@ function Dashboard({ session }) {
   const [codeCopied, setCodeCopied] = useState(false)
   const [copyFailed, setCopyFailed] = useState(false)
   const [generatingCode, setGeneratingCode] = useState(false)
-  const [cityNoteBannerOpen, setCityNoteBannerOpen] = useState(false)
+  const [cityNotesDrawer, setCityNotesDrawer] = useState(null) // id da cidade cujas anotações estão na sidesheet
   const [completedRemindersOpen, setCompletedRemindersOpen] = useState(false)
-
-  // Recolhe o banner de anotações sempre que troca de cidade, pra não
-  // "vazar" a nota de uma cidade aberta sem querer pra outra.
-  useEffect(() => {
-    setCityNoteBannerOpen(false)
-  }, [activeDestId])
 
   async function handleCopyInviteCode() {
     if (!trip?.invite_code) return
@@ -2560,6 +2566,17 @@ function Dashboard({ session }) {
     setExpandedDays(allDaysExpanded ? new Set() : new Set(allTimelineDates))
   }
 
+  // Na primeira vez que o Roteiro tem dias carregados, abre o dia de HOJE (se
+  // houver) na Visão geral. Depois disso a pessoa abre/fecha como quiser.
+  const initialExpandDone = useRef(false)
+  useEffect(() => {
+    if (initialExpandDone.current || allTimelineDates.length === 0) return
+    const today = localTodayIso()
+    if (!allTimelineDates.includes(today)) return
+    initialExpandDone.current = true
+    setExpandedDays(new Set([today]))
+  }, [allTimelineDates])
+
   // Sempre que a pessoa mexe em algum filtro do Roteiro (cidade, status ou
   // categoria), expande todos os dias automaticamente — assim ela já vê
   // direto o resultado, sem precisar abrir cada dia manualmente.
@@ -2567,6 +2584,17 @@ function Dashboard({ session }) {
     setExpandedDays(new Set(allTimelineDates))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDestId, statusFilter, categoryFilter])
+
+  // Cidade do roteiro "de hoje" (pelo dia local do aparelho): a primeira cidade
+  // do dia de hoje que tem anotações. Alimenta o banner recolhido do topo.
+  const todayCityDestId = useMemo(() => {
+    const day = timelineByDay.find((t) => t.date === localTodayIso())
+    if (!day) return null
+    return dayCityDestIds(day.items).find((id) => cityNoteByDestId[id]?.notes_content) ?? null
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timelineByDay, cityNoteByDestId, activeDestId])
+  // Com uma cidade filtrada, o banner é dela; na visão geral, é o da cidade de hoje.
+  const bannerDestId = activeDestId !== 'ALL' ? activeDestId : todayCityDestId
 
   // Hospedagem já "Confirmada" não precisa mais do alerta de cancelamento.
   const urgentAlerts = useMemo(
@@ -3086,28 +3114,19 @@ function Dashboard({ session }) {
               </div>
             </div>
 
-            {activeDestId !== 'ALL' && cityNoteByDestId[activeDestId]?.notes_content && (
+            {bannerDestId && cityNoteByDestId[bannerDestId]?.notes_content && (
               <div className="mt-3 overflow-hidden rounded-lg border border-border bg-card">
                 <button
                   type="button"
-                  onClick={() => setCityNoteBannerOpen((v) => !v)}
+                  onClick={() => setCityNotesDrawer(bannerDestId)}
                   className="flex w-full items-center justify-between px-3 py-2 font-mono text-[11px] text-muted-foreground"
                 >
                   <span className="flex items-center gap-1.5">
                     <ClipboardList className="h-3 w-3 shrink-0" aria-hidden="true" />
-                    Anotações de {activeDest?.city_name}
+                    Anotações de {destById[bannerDestId]}
                   </span>
-                  {cityNoteBannerOpen ? (
-                    <ChevronUp className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  ) : (
-                    <ChevronDown className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
-                  )}
+                  <ChevronRight className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
                 </button>
-                {cityNoteBannerOpen && (
-                  <p className="whitespace-pre-wrap border-t border-border px-3 py-2 font-mono text-[11px] text-muted-foreground">
-                    {cityNoteByDestId[activeDestId].notes_content}
-                  </p>
-                )}
               </div>
             )}
 
@@ -3137,6 +3156,7 @@ function Dashboard({ session }) {
                         <span className="font-semibold">
                           {date === 'Sem data' ? date : formatDate(date).replace(/\.$/, '')}
                         </span>
+                        {date !== 'Sem data' && <span className="font-normal"> · {weekdayShort(date)}</span>}
                         {contextLabel && <span className="font-normal"> · {contextLabel}</span>}
                       </span>
                       <span className="flex shrink-0 items-center gap-1 pl-2 text-[9px] font-normal text-muted-foreground/70">
@@ -3165,10 +3185,7 @@ function Dashboard({ session }) {
                                 </p>
                                 <button
                                   type="button"
-                                  onClick={() => {
-                                    if (activeDestId !== destId) setActiveDestId(destId)
-                                    setCityNoteBannerOpen(true)
-                                  }}
+                                  onClick={() => setCityNotesDrawer(destId)}
                                   className="inline-flex shrink-0 items-center gap-1 font-mono text-[10px] text-primary underline underline-offset-2"
                                 >
                                   Ver todas
@@ -4246,6 +4263,54 @@ function Dashboard({ session }) {
       )}
 
       {/* Drawer de auditoria "Lançamentos" — desliza da direita, altura cheia */}
+      {/* Sidesheet de anotações da cidade (abre do banner do topo e do "Ver todas") */}
+      {cityNotesDrawer && (
+        <div
+          className="fixed inset-0 z-50 flex justify-end bg-foreground/30 backdrop-blur-sm"
+          onClick={() => setCityNotesDrawer(null)}
+        >
+          <div
+            className="flex h-full w-full max-w-sm flex-col bg-card shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-border px-4 py-3">
+              <h2 className="flex items-center gap-2 font-display text-lg font-semibold text-foreground">
+                <ClipboardList className="h-4 w-4 text-primary" aria-hidden="true" />
+                Anotações de {destById[cityNotesDrawer]}
+              </h2>
+              <button
+                onClick={() => setCityNotesDrawer(null)}
+                aria-label="Fechar"
+                className="rounded-full p-1 text-muted-foreground hover:bg-muted"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-4 py-3">
+              {cityNoteByDestId[cityNotesDrawer]?.notes_content ? (
+                <p className="whitespace-pre-wrap font-mono text-sm text-foreground">
+                  {cityNoteByDestId[cityNotesDrawer].notes_content}
+                </p>
+              ) : (
+                <p className="font-mono text-xs text-muted-foreground">Nenhuma anotação para esta cidade ainda.</p>
+              )}
+            </div>
+            <div className="border-t border-border px-4 py-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setCityNotesDrawer(null)
+                  setView('detalhes')
+                }}
+                className="font-mono text-[11px] uppercase tracking-wide text-primary underline underline-offset-2"
+              >
+                Editar em Detalhes
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {ledgerDrawerOpen && (
         <div className="fixed inset-0 z-50 flex justify-end bg-foreground/30 backdrop-blur-sm">
           <div className="flex h-full w-full max-w-sm flex-col bg-card shadow-lg">
