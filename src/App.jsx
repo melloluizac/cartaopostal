@@ -2817,6 +2817,9 @@ function Dashboard({ session }) {
     // total daquela barra (mesmos checkboxes de status e mesma pessoa).
     const base = ledgerFilters.scoped ? statusFilteredExpenses : expenses
     return base.filter((e) => {
+      // Lançamento de valor zero (item do roteiro ainda sem custo) não tem
+      // o que auditar aqui, então não aparece.
+      if (!(Number(e.total_cost_eur) > 0)) return false
       if (ledgerFilters.scoped && gastosUserFilter !== 'Todos' && personShareOf(e, gastosUserFilter) <= 0) return false
       if (ledgerFilters.category !== 'all' && e.category !== ledgerFilters.category) return false
       if (ledgerFilters.paidBy !== 'all' && e.paid_by !== ledgerFilters.paidBy) return false
@@ -3425,7 +3428,7 @@ function Dashboard({ session }) {
 
             <section aria-labelledby="saldo-heading">
               <h2 id="saldo-heading" className="mb-2 flex items-center gap-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground">
-                <Wallet className="h-3.5 w-3.5" /> Saldo do grupo: quanto cada um desembolsou
+                <Wallet className="h-3.5 w-3.5" /> Saldo do grupo: quanto cada um deve ao outro
               </h2>
               <div className="grid grid-cols-2 gap-3">
                 {balances.length === 0 && (
@@ -3449,7 +3452,6 @@ function Dashboard({ session }) {
                           {formatMoney(Math.abs(b.balance))}
                         </span>
                       </p>
-                      <p className="font-display text-base font-semibold text-foreground">{formatMoney(b.totalPaid)}</p>
                     </button>
                   )
                 })}
