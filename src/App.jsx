@@ -29,6 +29,8 @@ import {
   UtensilsCrossed,
   ShoppingBag,
   CloudSun,
+  User,
+  Users,
 } from 'lucide-react'
 import WeatherTab from './Weather'
 import RoteiroExport from './RoteiroExport'
@@ -98,17 +100,17 @@ const daysUntil = (iso) => {
 }
 
 // NOTA DE ARQUITETURA:
-// Assumimos que as colunas `status` de accommodations / transport /
-// itinerary_activities usam os mesmos 4 valores do design system
-// (confirmado | pendente | atrasado | planejando). Ajuste o `STATUS_CONFIG`
-// abaixo se os valores reais no Supabase forem diferentes.
+// O app trabalha com 3 status: confirmado | pendente | planejando. O antigo
+// "atrasado" foi incorporado ao "pendente" (migração no banco). A chave
+// `atrasado` segue em STATUS_CONFIG/STATUS_OPTION_COLORS só como apelido de
+// "pendente", pra uma linha antiga que ainda tenha esse valor não quebrar a tela.
 const STATUS_CONFIG = {
   confirmado: { label: 'Confirmado', icon: Check, className: 'bg-secondary/25 text-secondary-foreground border-secondary/50' },
   pendente: { label: 'Pendente', icon: AlertCircle, className: 'bg-accent/15 text-accent border-accent/40' },
-  atrasado: { label: 'Atrasado', icon: AlertTriangle, className: 'bg-rosewood/10 text-rosewood border-rosewood/40' },
+  atrasado: { label: 'Pendente', icon: AlertCircle, className: 'bg-accent/15 text-accent border-accent/40' }, // legado = pendente
   planejando: { label: 'Planejando', icon: HelpCircle, className: 'bg-primary/10 text-primary border-primary/40' },
 }
-const STATUS_ORDER = ['confirmado', 'pendente', 'atrasado', 'planejando']
+const STATUS_ORDER = ['confirmado', 'pendente', 'planejando']
 
 // Horário aproximado de cada turno, usado só pra ORDENAR a timeline — um
 // passeio marcado só com "Manhã" (sem horário exato) precisa aparecer antes
@@ -130,7 +132,7 @@ function activityBucket(a) {
 const STATUS_OPTION_COLORS = {
   confirmado: { bg: '#d9e2cd', fg: '#2c3125' },
   pendente: { bg: '#f0dcd0', fg: '#7a3a1e' },
-  atrasado: { bg: '#f0d6d2', fg: '#7a2e22' },
+  atrasado: { bg: '#f0dcd0', fg: '#7a3a1e' }, // legado = pendente
   planejando: { bg: '#dbe6e8', fg: '#234047' },
 }
 
@@ -147,49 +149,122 @@ const CATEGORY_ICONS = {
   Compras: ShoppingBag,
 }
 
+// Status "efetivo" pra exibir: 'atrasado' (legado) vira pendente, e algo que
+// ainda está "planejando" mas cuja data já passou aparece como pendente
+// (derivado só na tela — nada é gravado por causa disso).
+function effectiveStatus(status, pastDate) {
+  const st = !status || status === 'atrasado' ? (status === 'atrasado' ? 'pendente' : 'planejando') : status
+  return pastDate && st === 'planejando' ? 'pendente' : st
+}
+
+// Data (YYYY-MM-DD) que define se um item do roteiro "já passou".
+function itemDateIso(item) {
+  const d = item.data
+  const raw = item.kind === 'activity' ? d.assigned_date : item.kind === 'transport' ? d.departure_date : d.check_out
+  return raw ? String(raw).slice(0, 10) : null
+}
+const isPastIso = (iso) => !!iso && iso < localTodayIso()
+
 // Se `onChange` for passado, o badge vira clicável: um <select> nativo fica
 // posicionado (invisível) por cima do badge inteiro, então o clique em
 // qualquer parte dele abre as opções de status. Sem `onChange`, é só o
-// badge estático de antes.
-function StatusBadge({ status, onChange }) {
-  const config = STATUS_CONFIG[status] ?? STATUS_CONFIG.planejando
+// badge estático de antes. `compact` = só a bolinha com o ícone (mais limpo).
+// `pastDate` = a data já passou: "planejando" aparece como pendente e o menu
+// só oferece Confirmado/Pendente.
+function StatusBadge({ status, onChange, compact = false, pastDate = false }) {
+  const shown = effectiveStatus(status, pastDate)
+  const config = STATUS_CONFIG[shown] ?? STATUS_CONFIG.planejando
   const Icon = config.icon
-  const content = (
+  const options = pastDate ? ['confirmado', 'pendente'] : STATUS_ORDER
+
+  const content = compact ? (
+    <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+  ) : (
     <>
       <Icon className="h-3 w-3" aria-hidden="true" />
       {config.label}
     </>
   )
+  const shape = compact
+    ? 'h-6 w-6 justify-center rounded-full border'
+    : 'gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide'
 
   if (!onChange) {
     return (
-      <span
-        className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide ${config.className}`}
-      >
+      <span title={config.label} className={`inline-flex items-center ${shape} ${config.className}`}>
         {content}
       </span>
     )
   }
 
   return (
-    <span
-      className={`relative inline-flex items-center gap-1 rounded-full border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide ${config.className}`}
-    >
+    <span title={config.label} className={`relative inline-flex items-center ${shape} ${config.className}`}>
       {content}
       <select
-        value={status ?? 'planejando'}
+        value={shown}
         onChange={(e) => onChange(e.target.value)}
         onClick={(e) => e.stopPropagation()}
         aria-label="Alterar status"
         className="absolute inset-0 h-full w-full cursor-pointer appearance-none border-0 bg-transparent p-0 opacity-0"
       >
-        {STATUS_ORDER.map((s) => (
-          <option key={s} value={s}>
-            {STATUS_CONFIG[s].label}
+        {options.map((st) => (
+          <option key={st} value={st}>
+            {STATUS_CONFIG[st].label}
           </option>
         ))}
       </select>
     </span>
+  )
+}
+
+// Campo de valor "de linha": mostra o valor na moeda da viagem e só grava ao
+// sair do campo (blur) ou apertar Enter, e só se o valor mudou.
+function InlineMoney({ value, onCommit }) {
+  const { rate, symbol } = useContext(MoneyContext)
+  const eur = Number(value) || 0
+  const shown = eur > 0 ? moneyFmt(eur * rate) : ''
+  const [text, setText] = useState(shown)
+  const [focused, setFocused] = useState(false)
+
+  useEffect(() => {
+    if (!focused) setText(shown)
+  }, [shown, focused])
+
+  function handleChange(e) {
+    let raw = e.target.value.replace(/[^\d.,]/g, '').replace('.', ',')
+    const [int = '', ...rest] = raw.split(',')
+    raw = rest.length ? `${int},${rest.join('').slice(0, 2)}` : int
+    setText(raw)
+  }
+  function commit() {
+    setFocused(false)
+    const typed = text === '' ? 0 : Number(text.replace(',', '.'))
+    if (Number.isNaN(typed)) return setText(shown)
+    const newEur = Number((typed / rate).toFixed(4))
+    if (Math.abs(newEur - eur) > 0.00005) onCommit(newEur)
+    else setText(shown)
+  }
+
+  return (
+    <div className="relative w-28 shrink-0">
+      <span className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 font-mono text-[11px] text-muted-foreground">
+        {symbol}
+      </span>
+      <input
+        type="text"
+        inputMode="decimal"
+        value={text}
+        placeholder="0,00"
+        onFocus={() => {
+          setFocused(true)
+          setText(eur > 0 ? String(Number((eur * rate).toFixed(2))).replace('.', ',') : '')
+        }}
+        onChange={handleChange}
+        onBlur={commit}
+        onKeyDown={(e) => e.key === 'Enter' && e.currentTarget.blur()}
+        className="w-full rounded-md border border-input bg-background py-1 pl-7 pr-2 text-right font-mono text-xs text-foreground"
+      />
+    </div>
   )
 }
 
@@ -1043,9 +1118,16 @@ function Dashboard({ session }) {
   const [destinations, setDestinations] = useState([])
   const [travelers, setTravelers] = useState([]) // linhas de trip_travelers, para os dropdowns "Pago por"
   const [activeDestId, setActiveDestId] = useState('ALL') // id de um destino, ou 'ALL' (Visão geral)
-  const [statusFilter, setStatusFilter] = useState('all') // 'all' | 'confirmado' | 'pendente' | 'atrasado' | 'planejando'
+  const [statusFilter, setStatusFilter] = useState('all') // 'all' | 'confirmado' | 'pendente' | 'planejando'
   const [categoryFilter, setCategoryFilter] = useState('all') // 'all' | 'activity' | 'transport' | 'accommodation'
   const [expandedDays, setExpandedDays] = useState(() => new Set()) // dias abertos na Visão geral (accordion)
+  const [roteiroLens, setRoteiroLens] = useState('plano') // 'plano' | 'gastos'
+  const [lensFilter, setLensFilter] = useState('all') // all | semvalor | pendente | planejando
+  const [lensOnlyMine, setLensOnlyMine] = useState(false)
+  const [splitPrompt, setSplitPrompt] = useState(null) // id do gasto aguardando 'aplicar a todos'
+  const [splitApplyAll, setSplitApplyAll] = useState(true)
+  const [expenseDefaultDate, setExpenseDefaultDate] = useState('')
+  const [showPastDays, setShowPastDays] = useState(false) // dias que já passaram ficam ocultos por padrão
   const [accommodations, setAccommodations] = useState([])
   const [activities, setActivities] = useState([])
   const [transport, setTransport] = useState([])
@@ -1065,7 +1147,7 @@ function Dashboard({ session }) {
   const [budgets, setBudgets] = useState([]) // linhas de trip_budgets
   const [budgetSheetOpen, setBudgetSheetOpen] = useState(false)
   const [ledgerDrawerOpen, setLedgerDrawerOpen] = useState(false)
-  const [ledgerFilters, setLedgerFilters] = useState({ category: 'all', paidBy: 'all', city: 'all', status: 'all' })
+  const [ledgerFilters, setLedgerFilters] = useState({ category: 'all', paidBy: 'all', city: 'all', status: 'all', dateFrom: '', dateTo: '' })
   const [editingExpense, setEditingExpense] = useState(null)
   const [syncPrompt, setSyncPrompt] = useState(null) // { resolve } | null
   // Se o item/lançamento em edição já tem cópia pro parceiro. Vem do servidor
@@ -1783,6 +1865,86 @@ function Dashboard({ session }) {
     await loadPendingCount()
   }
 
+  // --- Lente "Gastos" do Roteiro: edição rápida de linhas do extrato ------
+  // Acha o item do roteiro (passeio/transporte/hospedagem) ligado a um gasto.
+  function linkedItemOf(expenseId) {
+    const a = overviewActivities.find((r) => r.linked_expense_id === expenseId)
+    if (a) return { table: 'itinerary_activities', id: a.id }
+    const t = overviewTransport.find((r) => r.linked_expense_id === expenseId)
+    if (t) return { table: 'transport', id: t.id }
+    const h = overviewAccommodations.find((r) => r.linked_expense_id === expenseId)
+    if (h) return { table: 'accommodations', id: h.id }
+    return null
+  }
+
+  async function handleLedgerStatus(e, newStatus) {
+    const linked = linkedItemOf(e.id)
+    if (linked) {
+      await handleStatusChange(linked.table, linked.id, newStatus, e.id)
+      return
+    }
+    const { error } = await supabase.from('expenses_ledger').update({ status: newStatus }).eq('id', e.id)
+    if (error) return setErrorMsg(friendlyError(error))
+    await refreshFinancials()
+  }
+
+  async function handleLedgerAmount(e, newEur) {
+    const { error } = await supabase.from('expenses_ledger').update({ total_cost_eur: newEur }).eq('id', e.id)
+    if (error) return setErrorMsg(friendlyError(error))
+    // mantém o custo do item do roteiro igual ao do gasto ligado a ele
+    const linked = linkedItemOf(e.id)
+    if (linked) {
+      await supabase.from(linked.table).update({ total_cost_eur: newEur }).eq('id', linked.id)
+    }
+    if (!e.parent_id && e.split_type === 'individual') {
+      await syncDuplicateOnEdit({
+        expenseId: e.id,
+        totalCost: newEur,
+        description: e.description,
+        titleOrTotalChanged: true,
+      })
+    }
+    await refreshFinancials()
+    if (linked) {
+      await loadItineraryData(activeDestId)
+      await loadPendingCount()
+    }
+  }
+
+  // Alterna Individual (um bonequinho) <-> Compartilhado (vários).
+  async function handleLedgerSplit(e, toIndividual, applyAll) {
+    const splitType = toIndividual ? 'individual' : 'igual'
+    const paidBy = toIndividual ? currentTravelerName : e.paid_by || currentTravelerName
+    const { error } = await supabase
+      .from('expenses_ledger')
+      .update({ split_type: splitType, paid_by: paidBy })
+      .eq('id', e.id)
+    if (error) return setErrorMsg(friendlyError(error))
+    if (!e.parent_id) {
+      let hadTwins = false
+      if (e.split_type === 'individual') {
+        const { data } = await supabase.rpc('expense_has_twins', { p_expense_id: e.id })
+        hadTwins = !!data
+      }
+      await handleTwinsOnEdit({
+        expenseId: e.id,
+        existingSplitType: e.split_type,
+        splitType,
+        wantTwins: toIndividual && applyAll,
+        hadTwins,
+        paidBy,
+        totalCost: Number(e.total_cost_eur) || 0,
+        date: e.transaction_date,
+        description: e.description,
+        category: e.category,
+        status: e.status || 'confirmado',
+        titleOrTotalChanged: false,
+      })
+    }
+    setSplitPrompt(null)
+    await refreshFinancials()
+  }
+
   // --- Handlers de insert -------------------------------------------------
 
   async function handleAddDestination(form) {
@@ -2359,7 +2521,7 @@ function Dashboard({ session }) {
   // transporte entre cidades naquele dia, mostra "Origem ➔ Destino" (dia de
   // deslocamento); senão mostra a cidade (com sufixo de bate-volta se for
   // o caso).
-  function dayContextLabel(items) {
+  function dayContextLabel(items, date) {
     const transportItem = items.find((i) => i.kind === 'transport')
     if (transportItem) {
       return `${transportItem.data.origin_city} ➔ ${transportItem.data.destination_city}`
@@ -2367,11 +2529,40 @@ function Dashboard({ session }) {
     if (activeDestId !== 'ALL') {
       return activeDest ? cityLabelForDest(activeDest) : ''
     }
-    const withDest = items.find((i) => i.data.destination_id)
-    if (withDest) {
-      return cityLabelForDest(destinations.find((d) => d.id === withDest.data.destination_id))
+    const destId = dayPrimaryDestId(items, date)
+    return destId ? cityLabelForDest(destinations.find((d) => d.id === destId)) : ''
+  }
+
+  // Cidade "principal" de um dia sem transporte. NÃO pode depender da ordem em
+  // que os itens chegaram do banco (ela muda de um carregamento pro outro e
+  // fazia o dia aparecer ora com uma cidade, ora com outra). Prioridade:
+  // 1) onde estão os passeios do dia (a cidade mais frequente);
+  // 2) a hospedagem em que se dorme naquela noite (não a do dia de check-out);
+  // 3) qualquer hospedagem; 4) o esqueleto da cidade.
+  // Empates se resolvem pela ordem das cidades no roteiro (destinations).
+  function dayPrimaryDestId(items, date) {
+    const rank = (id) => {
+      const i = destinations.findIndex((d) => d.id === id)
+      return i === -1 ? 1e9 : i
     }
-    return ''
+    const pick = (ids) => {
+      const count = {}
+      for (const id of ids) if (id) count[id] = (count[id] || 0) + 1
+      const entries = Object.entries(count)
+      if (!entries.length) return null
+      entries.sort((x, y) => y[1] - x[1] || rank(x[0]) - rank(y[0]))
+      return entries[0][0]
+    }
+    return (
+      pick(items.filter((i) => i.kind === 'activity').map((i) => i.data.destination_id)) ??
+      pick(
+        items
+          .filter((i) => i.kind === 'accommodation' && !(date && i.data.check_out === date))
+          .map((i) => i.data.destination_id)
+      ) ??
+      pick(items.filter((i) => i.kind === 'accommodation').map((i) => i.data.destination_id)) ??
+      pick(items.map((i) => i.data.destination_id))
+    )
   }
 
   // Todas as cidades relevantes pra um dia — mais de uma quando o dia é de
@@ -2451,7 +2642,7 @@ function Dashboard({ session }) {
   // tela Início.
   function matchesStatusFilter(status) {
     if (statusFilter === 'all') return true
-    if (statusFilter === 'pendente_atrasado') return status === 'pendente' || status === 'atrasado'
+    if (statusFilter === 'pendente' || statusFilter === 'pendente_atrasado') return status === 'pendente' || status === 'atrasado' // "atrasado" = legado
     return status === statusFilter
   }
 
@@ -2557,6 +2748,20 @@ function Dashboard({ session }) {
     }
     return null
   }
+
+  // Dias que já passaram (antes de hoje, no fuso do aparelho) ficam ocultos até
+  // a pessoa pedir "Ver dias anteriores". "Sem data" nunca é considerado passado.
+  const pastDaysCount = useMemo(
+    () => timelineByDay.filter((d) => d.date !== 'Sem data' && d.date < localTodayIso()).length,
+    [timelineByDay]
+  )
+  const visibleTimeline = useMemo(
+    () =>
+      showPastDays
+        ? timelineByDay
+        : timelineByDay.filter((d) => d.date === 'Sem data' || d.date >= localTodayIso()),
+    [timelineByDay, showPastDays]
+  )
 
   // Usado pelo botão "Expandir tudo" no topo da tela Roteiro (só relevante
   // no modo accordion, ou seja, na Visão geral).
@@ -2825,6 +3030,9 @@ function Dashboard({ session }) {
       if (ledgerFilters.paidBy !== 'all' && e.paid_by !== ledgerFilters.paidBy) return false
       if (ledgerFilters.status !== 'all' && (e.status ?? 'confirmado') !== ledgerFilters.status) return false
       if (ledgerFilters.city !== 'all' && expenseCityTag(e.description) !== ledgerFilters.city) return false
+      // Período: lançamento sem data não passa quando há filtro de data.
+      if (ledgerFilters.dateFrom && !(e.transaction_date && e.transaction_date >= ledgerFilters.dateFrom)) return false
+      if (ledgerFilters.dateTo && !(e.transaction_date && e.transaction_date <= ledgerFilters.dateTo)) return false
       return true
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -2833,7 +3041,7 @@ function Dashboard({ session }) {
   // Abre o drawer de Lançamentos já pré-filtrado — usado pelo drill-down dos
   // gráficos (clicar numa barra de categoria ou num card de saldo).
   function openLedgerDrawer(partialFilters) {
-    setLedgerFilters({ category: 'all', paidBy: 'all', city: 'all', status: 'all', ...partialFilters })
+    setLedgerFilters({ category: 'all', paidBy: 'all', city: 'all', status: 'all', dateFrom: '', dateTo: '', ...partialFilters })
     setLedgerDrawerOpen(true)
   }
 
@@ -2910,7 +3118,7 @@ function Dashboard({ session }) {
           <div className="grid flex-1 grid-cols-4 gap-1">
             {[
               { key: 'roteiro', label: 'Roteiro', icon: MapPin },
-              { key: 'gastos', label: 'Gastos', icon: Wallet },
+              { key: 'gastos', label: 'Painel', icon: Wallet },
               { key: 'detalhes', label: 'Detalhes', icon: ClipboardList },
               { key: 'clima', label: 'Clima', icon: CloudSun },
             ].map(({ key, label, icon: NavIcon }) => (
@@ -2951,7 +3159,6 @@ function Dashboard({ session }) {
               className="rounded-md border border-input bg-card px-2 py-1 font-mono text-[10px] text-foreground"
             >
               <option value="all">Status</option>
-              <option value="pendente_atrasado">Pendente + atrasado</option>
               {STATUS_ORDER.map((s) => (
                 <option
                   key={s}
@@ -3025,7 +3232,7 @@ function Dashboard({ session }) {
             <button
               onClick={() => {
                 setActiveDestId('ALL')
-                setStatusFilter('pendente_atrasado')
+                setStatusFilter('pendente')
                 setCategoryFilter('all')
                 setView('roteiro')
               }}
@@ -3105,7 +3312,7 @@ function Dashboard({ session }) {
                 >
                   + Cidade
                 </button>
-                {activeDestId === 'ALL' && allTimelineDates.length > 0 && (
+                {roteiroLens === 'plano' && activeDestId === 'ALL' && allTimelineDates.length > 0 && (
                   <button
                     type="button"
                     onClick={toggleExpandAll}
@@ -3117,7 +3324,201 @@ function Dashboard({ session }) {
               </div>
             </div>
 
-            {bannerDestId && cityNoteByDestId[bannerDestId]?.notes_content && (
+            <div className="mt-2 grid grid-cols-2 gap-1 rounded-lg border border-border bg-card p-1">
+              {[
+                ['plano', 'Plano'],
+                ['gastos', 'Gastos'],
+              ].map(([k, label]) => (
+                <button
+                  key={k}
+                  type="button"
+                  onClick={() => setRoteiroLens(k)}
+                  className={`rounded-md py-1 font-mono text-[10px] uppercase tracking-wide ${
+                    roteiroLens === k ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {roteiroLens === 'gastos' && (() => {
+              const today = localTodayIso()
+              const me = currentTravelerName
+              const dayLabelFor = (date) => {
+                const d = timelineByDay.find((x) => x.date === date)
+                return d ? dayContextLabel(d.items, date) : ''
+              }
+              const passes = (e) => {
+                const st = effectiveStatus(e.status ?? 'confirmado', isPastIso(e.transaction_date))
+                if (lensOnlyMine && !(e.split_type === 'igual' || e.paid_by === me)) return false
+                if (lensFilter === 'semvalor') return !(Number(e.total_cost_eur) > 0)
+                if (lensFilter === 'pendente') return st === 'pendente'
+                if (lensFilter === 'planejando') return st === 'planejando'
+                return true
+              }
+              const byDate = {}
+              expenses.forEach((e) => {
+                const d = String(e.transaction_date ?? '').slice(0, 10) || 'Sem data'
+                ;(byDate[d] ||= []).push(e)
+              })
+              const dates = Object.keys(byDate)
+              const rank = (d) => (d === today ? 0 : d === 'Sem data' ? 3 : d < today ? 1 : 2)
+              dates.sort((a, b) => {
+                const ra = rank(a), rb = rank(b)
+                if (ra !== rb) return ra - rb
+                return ra === 1 ? (a < b ? 1 : -1) : a < b ? -1 : 1
+              })
+              const chips = [
+                ['all', 'Todos'],
+                ['semvalor', 'Sem valor'],
+                ['pendente', 'Pendente'],
+                ['planejando', 'Planejando'],
+              ]
+              const visibleDates = dates.filter((d) => byDate[d].some(passes))
+              return (
+                <div className="mt-3 flex flex-col gap-3">
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {chips.map(([k, label]) => (
+                      <button
+                        key={k}
+                        type="button"
+                        onClick={() => setLensFilter(k)}
+                        className={`rounded-full border px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wide ${
+                          lensFilter === k
+                            ? 'border-primary bg-primary text-primary-foreground'
+                            : 'border-border bg-card text-muted-foreground'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setLensOnlyMine((v) => !v)}
+                      className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wide ${
+                        lensOnlyMine
+                          ? 'border-primary bg-primary text-primary-foreground'
+                          : 'border-border bg-card text-muted-foreground'
+                      }`}
+                    >
+                      <User className="h-3 w-3" aria-hidden="true" /> Só meus
+                    </button>
+                  </div>
+
+                  {visibleDates.length === 0 && (
+                    <p className="rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
+                      Nenhum gasto encontrado com esses filtros.
+                    </p>
+                  )}
+
+                  {visibleDates.map((date) => {
+                    const dayRows = byDate[date]
+                    const rows = dayRows.filter(passes)
+                    const myTotal = dayRows.reduce((sum, e) => sum + personShareOf(e, me), 0)
+                    const label = date === 'Sem data' ? date : formatDate(date).replace(/\.$/, '')
+                    const city = date === 'Sem data' ? '' : dayLabelFor(date)
+                    return (
+                      <div key={date}>
+                        <div className="mb-1.5 flex items-center justify-between font-mono uppercase tracking-wide">
+                          <span className="text-[11px] text-foreground">
+                            <span className="font-semibold">{label}</span>
+                            {date !== 'Sem data' && <span className="font-normal"> · {weekdayShort(date)}</span>}
+                            {date === today && <span className="font-normal text-primary"> · hoje</span>}
+                            {city && <span className="font-normal"> · {city}</span>}
+                          </span>
+                          <span className="flex shrink-0 items-center gap-1 pl-2 text-[11px] font-semibold text-foreground">
+                            <User className="h-3 w-3 text-muted-foreground" aria-hidden="true" />
+                            {formatMoney(myTotal)}
+                          </span>
+                        </div>
+                        <div className="flex flex-col gap-1.5">
+                          {rows.map((e) => {
+                            const Icon = CATEGORY_ICONS[e.category] ?? Wallet
+                            const linked = linkedItemOf(e.id)
+                            const isIndividual = e.split_type === 'individual'
+                            const noValue = !(Number(e.total_cost_eur) > 0)
+                            const { name } = splitCategoryPrefix(e.description)
+                            return (
+                              <div key={e.id} className="rounded-lg border border-border bg-card px-2 py-1.5">
+                                <div className="flex items-center gap-2">
+                                  <Icon className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                                  <div className="min-w-0 flex-1">
+                                    <p className="truncate text-sm text-foreground">{name}</p>
+                                    <p className="flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground">
+                                      {!linked && (
+                                        <span className="rounded border border-border px-1 uppercase">avulso</span>
+                                      )}
+                                      {noValue && <span className="text-accent">sem valor</span>}
+                                    </p>
+                                  </div>
+                                  <InlineMoney value={e.total_cost_eur} onCommit={(v) => handleLedgerAmount(e, v)} />
+                                  <button
+                                    type="button"
+                                    disabled={!!e.parent_id}
+                                    onClick={() => {
+                                      if (isIndividual) handleLedgerSplit(e, false, false)
+                                      else {
+                                        setSplitApplyAll(true)
+                                        setSplitPrompt(splitPrompt === e.id ? null : e.id)
+                                      }
+                                    }}
+                                    aria-label={isIndividual ? 'Individual — tocar para compartilhar' : 'Compartilhado — tocar para tornar individual'}
+                                    title={isIndividual ? 'Individual' : 'Compartilhado'}
+                                    className="shrink-0 rounded-full p-1 text-muted-foreground hover:bg-muted disabled:opacity-40"
+                                  >
+                                    {isIndividual ? <User className="h-4 w-4" /> : <Users className="h-4 w-4" />}
+                                  </button>
+                                  <StatusBadge
+                                    compact
+                                    pastDate={isPastIso(e.transaction_date)}
+                                    status={e.status ?? 'confirmado'}
+                                    onChange={(st) => handleLedgerStatus(e, st)}
+                                  />
+                                </div>
+                                {splitPrompt === e.id && (
+                                  <div className="mt-1.5 flex items-center justify-between gap-2 border-t border-border/60 pt-1.5">
+                                    <label className="flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground">
+                                      <input
+                                        type="checkbox"
+                                        checked={splitApplyAll}
+                                        onChange={(ev) => setSplitApplyAll(ev.target.checked)}
+                                      />
+                                      Aplicar custo a todos os viajantes
+                                    </label>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleLedgerSplit(e, true, splitApplyAll)}
+                                      className="rounded-full bg-primary px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wide text-primary-foreground"
+                                    >
+                                      Tornar individual
+                                    </button>
+                                  </div>
+                                )}
+                              </div>
+                            )
+                          })}
+                        </div>
+                        {date !== 'Sem data' && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setExpenseDefaultDate(date)
+                              setOpenSheet('expense')
+                            }}
+                            className="mt-1 font-mono text-[10px] uppercase tracking-wide text-muted-foreground underline underline-offset-2"
+                          >
+                            + lançar neste dia
+                          </button>
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )
+            })()}
+
+            {roteiroLens === 'plano' && bannerDestId && cityNoteByDestId[bannerDestId]?.notes_content && (
               <div className="mt-3 overflow-hidden rounded-lg border border-border bg-card">
                 <button
                   type="button"
@@ -3134,18 +3535,34 @@ function Dashboard({ session }) {
             )}
 
             {/* Timeline cronológica (hospedagem + passeios + transporte) */}
-            <div className="mt-4 flex flex-col gap-4">
+            <div className={`mt-4 flex-col gap-4 ${roteiroLens === 'plano' ? 'flex' : 'hidden'}`}>
               {timelineByDay.length === 0 && (
                 <p className="rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
                   Nada planejado para {activeDestId === 'ALL' ? 'a viagem' : activeDest?.city_name ?? 'este destino'}{' '}
                   ainda.
                 </p>
               )}
-              {timelineByDay.map(({ date, items }) => {
+              {pastDaysCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowPastDays((v) => !v)}
+                  className="flex items-center justify-center gap-1.5 rounded-lg border border-dashed border-border bg-card/60 px-3 py-2 font-mono text-[10px] uppercase tracking-wide text-muted-foreground"
+                >
+                  {showPastDays ? (
+                    <ChevronUp className="h-3 w-3" aria-hidden="true" />
+                  ) : (
+                    <ChevronDown className="h-3 w-3" aria-hidden="true" />
+                  )}
+                  {showPastDays
+                    ? 'Ocultar dias anteriores'
+                    : `Ver dias anteriores (${pastDaysCount} ${pastDaysCount === 1 ? 'dia' : 'dias'})`}
+                </button>
+              )}
+              {visibleTimeline.map(({ date, items }) => {
                 const realItems = items.filter((i) => i.kind !== 'placeholder')
                 const isAccordion = activeDestId === 'ALL'
                 const isExpanded = !isAccordion || expandedDays.has(date)
-                const contextLabel = dayContextLabel(items)
+                const contextLabel = dayContextLabel(items, date)
                 return (
                   <div key={date}>
                     <button
@@ -3351,6 +3768,8 @@ function Dashboard({ session }) {
                                 </div>
                                 <div className="flex shrink-0 flex-col items-center gap-1">
                                   <StatusBadge
+                                    compact
+                                    pastDate={isPastIso(itemDateIso(item))}
                                     status={item.data.status}
                                     onChange={(newStatus) =>
                                       handleStatusChange(
@@ -3414,6 +3833,9 @@ function Dashboard({ session }) {
         {/* ================= TELA 3 — GASTOS ================= */}
         {view === 'gastos' && (
           <div className="flex flex-col gap-6">
+            <h2 className="-mb-3 flex items-center gap-1.5 font-mono text-xs uppercase tracking-wide text-muted-foreground">
+              <Wallet className="h-3.5 w-3.5" /> Painel de gastos
+            </h2>
             {!hasBudgetForCurrentUser && (
               <div className="flex justify-end">
                 <button
@@ -3517,7 +3939,7 @@ function Dashboard({ session }) {
                       onChange={(e) => setIncludePendenteAtrasado(e.target.checked)}
                       className="accent-primary"
                     />
-                    Pendente + atrasado
+                    Pendente
                   </label>
                   <label className="flex items-center gap-1.5 font-mono text-[10px] text-foreground">
                     <input
@@ -3897,7 +4319,7 @@ function Dashboard({ session }) {
               name: 'status',
               label: 'Status',
               type: 'select',
-              options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
+              options: ['confirmado', 'pendente', 'planejando'],
               default: 'planejando',
               variant: 'status-pill',
               row: 'first',
@@ -3963,7 +4385,7 @@ function Dashboard({ session }) {
               name: 'status',
               label: 'Status',
               type: 'select',
-              options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
+              options: ['confirmado', 'pendente', 'planejando'],
               default: 'planejando',
               variant: 'status-pill',
             },
@@ -4013,7 +4435,7 @@ function Dashboard({ session }) {
               name: 'status',
               label: 'Status',
               type: 'select',
-              options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
+              options: ['confirmado', 'pendente', 'planejando'],
               default: 'planejando',
               variant: 'status-pill',
               row: 'first',
@@ -4074,7 +4496,7 @@ function Dashboard({ session }) {
               name: 'status',
               label: 'Status',
               type: 'select',
-              options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
+              options: ['confirmado', 'pendente', 'planejando'],
               variant: 'status-pill',
               row: 'first',
               width: '1/3',
@@ -4137,7 +4559,7 @@ function Dashboard({ session }) {
               name: 'status',
               label: 'Status',
               type: 'select',
-              options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
+              options: ['confirmado', 'pendente', 'planejando'],
               variant: 'status-pill',
             },
             { name: 'total_cost_eur', label: 'Valor Total', type: 'money', row: 'money', width: '1/3' },
@@ -4188,7 +4610,7 @@ function Dashboard({ session }) {
               name: 'status',
               label: 'Status',
               type: 'select',
-              options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
+              options: ['confirmado', 'pendente', 'planejando'],
               variant: 'status-pill',
               row: 'first',
               width: '1/3',
@@ -4223,11 +4645,14 @@ function Dashboard({ session }) {
         <QuickAddSheet
           title="Novo gasto"
           icon={Wallet}
-          onClose={() => setOpenSheet(null)}
+          onClose={() => {
+            setOpenSheet(null)
+            setExpenseDefaultDate('')
+          }}
           onSubmit={handleAddExpense}
           fields={[
             { name: 'description', label: 'Descrição', required: true, suggestions: expenseSuggestions },
-            { name: 'transaction_date', label: 'Data', type: 'date', default: todayIso() },
+            { name: 'transaction_date', label: 'Data', type: 'date', default: expenseDefaultDate || todayIso() },
             { name: 'category', label: 'Categoria', type: 'select', options: EXPENSE_CATEGORIES },
             { name: 'total_cost_eur', label: 'Valor Total', type: 'money', row: 'money', width: '1/3' },
             {
@@ -4383,6 +4808,27 @@ function Dashboard({ session }) {
                   </option>
                 ))}
               </select>
+
+              <label className="flex flex-col gap-0.5 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                De
+                <input
+                  type="date"
+                  value={ledgerFilters.dateFrom}
+                  max={ledgerFilters.dateTo || undefined}
+                  onChange={(e) => setLedgerFilters((f) => ({ ...f, dateFrom: e.target.value }))}
+                  className="rounded-md border border-input bg-background px-2 py-1 font-mono text-[10px] normal-case text-foreground"
+                />
+              </label>
+              <label className="flex flex-col gap-0.5 font-mono text-[9px] uppercase tracking-wide text-muted-foreground">
+                Até
+                <input
+                  type="date"
+                  value={ledgerFilters.dateTo}
+                  min={ledgerFilters.dateFrom || undefined}
+                  onChange={(e) => setLedgerFilters((f) => ({ ...f, dateTo: e.target.value }))}
+                  className="rounded-md border border-input bg-background px-2 py-1 font-mono text-[10px] normal-case text-foreground"
+                />
+              </label>
             </div>
 
             <div className="flex-1 overflow-y-auto px-4 py-3">
@@ -4424,7 +4870,7 @@ function Dashboard({ session }) {
                         <span className="inline-flex items-center rounded-full border border-border bg-background px-2 py-0.5 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
                           {splitLabel}
                         </span>
-                        <StatusBadge status={e.status ?? 'confirmado'} />
+                        <StatusBadge status={e.status ?? 'confirmado'} pastDate={isPastIso(e.transaction_date)} />
                       </div>
                     </button>
                   )
@@ -4537,7 +4983,7 @@ function Dashboard({ session }) {
               name: 'status',
               label: 'Status',
               type: 'select',
-              options: ['confirmado', 'pendente', 'atrasado', 'planejando'],
+              options: ['confirmado', 'pendente', 'planejando'],
               variant: 'status-pill',
             },
             {
