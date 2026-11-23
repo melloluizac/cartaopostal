@@ -1122,7 +1122,7 @@ function Dashboard({ session }) {
   const [categoryFilter, setCategoryFilter] = useState('all') // 'all' | 'activity' | 'transport' | 'accommodation'
   const [expandedDays, setExpandedDays] = useState(() => new Set()) // dias abertos na Visão geral (accordion)
   const [roteiroLens, setRoteiroLens] = useState('plano') // 'plano' | 'gastos'
-  const [lensFilter, setLensFilter] = useState('all') // all | semvalor | pendente | planejando
+  const [lensShowNoValue, setLensShowNoValue] = useState(false) // por padrão, gastos sem valor (passeios gratuitos) ficam ocultos
   const [lensOnlyMine, setLensOnlyMine] = useState(false)
   const [splitPrompt, setSplitPrompt] = useState(null) // id do gasto aguardando 'aplicar a todos'
   const [splitApplyAll, setSplitApplyAll] = useState(true)
@@ -3139,7 +3139,25 @@ function Dashboard({ session }) {
         {/* Filtros da tela Roteiro — moram dentro do header sticky de propósito,
             pra ficarem "grudados" bem abaixo dele ao rolar a página. */}
         {view === 'roteiro' && (
-          <div className="mx-auto mt-2 grid max-w-2xl grid-cols-3 gap-2">
+          <div className="mx-auto mt-2 flex max-w-2xl flex-col gap-2">
+          <div className="grid grid-cols-2 gap-1">
+            {[
+              ['plano', 'Plano'],
+              ['gastos', 'Gastos'],
+            ].map(([k, label]) => (
+              <button
+                key={k}
+                type="button"
+                onClick={() => setRoteiroLens(k)}
+                className={`rounded-md py-1.5 font-mono text-[10px] uppercase tracking-tight transition-colors ${
+                  roteiroLens === k ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <div className="grid grid-cols-3 gap-2">
             <select
               value={activeDestId}
               onChange={(e) => setActiveDestId(e.target.value)}
@@ -3180,6 +3198,29 @@ function Dashboard({ session }) {
               <option value="transport">Transporte</option>
               <option value="accommodation">Hospedagem</option>
             </select>
+          </div>
+          {roteiroLens === 'gastos' && (
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setLensShowNoValue((v) => !v)}
+                className={`rounded-full border px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wide ${
+                  lensShowNoValue ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-card text-muted-foreground'
+                }`}
+              >
+                Mostrar sem valor
+              </button>
+              <button
+                type="button"
+                onClick={() => setLensOnlyMine((v) => !v)}
+                className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wide ${
+                  lensOnlyMine ? 'border-primary bg-primary text-primary-foreground' : 'border-border bg-card text-muted-foreground'
+                }`}
+              >
+                <User className="h-3 w-3" aria-hidden="true" /> Só meus
+              </button>
+            </div>
+          )}
           </div>
         )}
       </header>
@@ -3324,24 +3365,6 @@ function Dashboard({ session }) {
               </div>
             </div>
 
-            <div className="mt-2 grid grid-cols-2 gap-1 rounded-lg border border-border bg-card p-1">
-              {[
-                ['plano', 'Plano'],
-                ['gastos', 'Gastos'],
-              ].map(([k, label]) => (
-                <button
-                  key={k}
-                  type="button"
-                  onClick={() => setRoteiroLens(k)}
-                  className={`rounded-md py-1 font-mono text-[10px] uppercase tracking-wide ${
-                    roteiroLens === k ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-
             {roteiroLens === 'gastos' && (() => {
               const today = localTodayIso()
               const me = currentTravelerName
@@ -3349,12 +3372,16 @@ function Dashboard({ session }) {
                 const d = timelineByDay.find((x) => x.date === date)
                 return d ? dayContextLabel(d.items, date) : ''
               }
+              const catMap = { activity: 'Passeio', transport: 'Transporte', accommodation: 'Hospedagem' }
+              const cityDates = new Set(timelineByDay.map((d) => d.date))
               const passes = (e) => {
                 const st = effectiveStatus(e.status ?? 'confirmado', isPastIso(e.transaction_date))
+                const d = String(e.transaction_date ?? '').slice(0, 10)
+                if (!lensShowNoValue && !(Number(e.total_cost_eur) > 0)) return false
                 if (lensOnlyMine && !(e.split_type === 'igual' || e.paid_by === me)) return false
-                if (lensFilter === 'semvalor') return !(Number(e.total_cost_eur) > 0)
-                if (lensFilter === 'pendente') return st === 'pendente'
-                if (lensFilter === 'planejando') return st === 'planejando'
+                if (categoryFilter !== 'all' && e.category !== catMap[categoryFilter]) return false
+                if (!matchesStatusFilter(st)) return false
+                if (activeDestId !== 'ALL' && !cityDates.has(d)) return false
                 return true
               }
               const byDate = {}
@@ -3369,43 +3396,9 @@ function Dashboard({ session }) {
                 if (ra !== rb) return ra - rb
                 return ra === 1 ? (a < b ? 1 : -1) : a < b ? -1 : 1
               })
-              const chips = [
-                ['all', 'Todos'],
-                ['semvalor', 'Sem valor'],
-                ['pendente', 'Pendente'],
-                ['planejando', 'Planejando'],
-              ]
               const visibleDates = dates.filter((d) => byDate[d].some(passes))
               return (
                 <div className="mt-3 flex flex-col gap-3">
-                  <div className="flex flex-wrap items-center gap-1.5">
-                    {chips.map(([k, label]) => (
-                      <button
-                        key={k}
-                        type="button"
-                        onClick={() => setLensFilter(k)}
-                        className={`rounded-full border px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wide ${
-                          lensFilter === k
-                            ? 'border-primary bg-primary text-primary-foreground'
-                            : 'border-border bg-card text-muted-foreground'
-                        }`}
-                      >
-                        {label}
-                      </button>
-                    ))}
-                    <button
-                      type="button"
-                      onClick={() => setLensOnlyMine((v) => !v)}
-                      className={`inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 font-mono text-[10px] uppercase tracking-wide ${
-                        lensOnlyMine
-                          ? 'border-primary bg-primary text-primary-foreground'
-                          : 'border-border bg-card text-muted-foreground'
-                      }`}
-                    >
-                      <User className="h-3 w-3" aria-hidden="true" /> Só meus
-                    </button>
-                  </div>
-
                   {visibleDates.length === 0 && (
                     <p className="rounded-xl border border-dashed border-border p-4 text-center font-mono text-xs text-muted-foreground">
                       Nenhum gasto encontrado com esses filtros.
@@ -3445,36 +3438,48 @@ function Dashboard({ session }) {
                                   <Icon className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
                                   <div className="min-w-0 flex-1">
                                     <p className="truncate text-sm text-foreground">{name}</p>
-                                    <p className="flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground">
-                                      {!linked && (
-                                        <span className="rounded border border-border px-1 uppercase">avulso</span>
-                                      )}
-                                      {noValue && <span className="text-accent">sem valor</span>}
-                                    </p>
                                   </div>
                                   <InlineMoney value={e.total_cost_eur} onCommit={(v) => handleLedgerAmount(e, v)} />
-                                  <button
-                                    type="button"
-                                    disabled={!!e.parent_id}
-                                    onClick={() => {
-                                      if (isIndividual) handleLedgerSplit(e, false, false)
-                                      else {
-                                        setSplitApplyAll(true)
-                                        setSplitPrompt(splitPrompt === e.id ? null : e.id)
-                                      }
-                                    }}
-                                    aria-label={isIndividual ? 'Individual — tocar para compartilhar' : 'Compartilhado — tocar para tornar individual'}
-                                    title={isIndividual ? 'Individual' : 'Compartilhado'}
-                                    className="shrink-0 rounded-full p-1 text-muted-foreground hover:bg-muted disabled:opacity-40"
-                                  >
-                                    {isIndividual ? <User className="h-4 w-4" /> : <Users className="h-4 w-4" />}
-                                  </button>
                                   <StatusBadge
                                     compact
                                     pastDate={isPastIso(e.transaction_date)}
                                     status={e.status ?? 'confirmado'}
                                     onChange={(st) => handleLedgerStatus(e, st)}
                                   />
+                                </div>
+                                <div className="mt-1 flex items-center justify-between gap-2 pl-6">
+                                  <span className="flex items-center gap-1.5 font-mono text-[10px] text-muted-foreground">
+                                    {!linked && <span className="rounded border border-border px-1 uppercase">avulso</span>}
+                                    {noValue && <span className="text-accent">sem valor</span>}
+                                  </span>
+                                  <div className="inline-flex rounded-md border border-border bg-background p-0.5">
+                                    {[
+                                      ['individual', 'Individual', User],
+                                      ['shared', 'Compartilhado', Users],
+                                    ].map(([k, lbl, Ic]) => {
+                                      const active = (k === 'individual') === isIndividual
+                                      return (
+                                        <button
+                                          key={k}
+                                          type="button"
+                                          disabled={!!e.parent_id}
+                                          onClick={() => {
+                                            if (active) return
+                                            if (k === 'individual') {
+                                              setSplitApplyAll(true)
+                                              setSplitPrompt(splitPrompt === e.id ? null : e.id)
+                                            } else handleLedgerSplit(e, false, false)
+                                          }}
+                                          className={`inline-flex items-center gap-1 rounded px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-tight disabled:opacity-60 ${
+                                            active ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'
+                                          }`}
+                                        >
+                                          <Ic className="h-3 w-3" aria-hidden="true" />
+                                          {lbl}
+                                        </button>
+                                      )
+                                    })}
+                                  </div>
                                 </div>
                                 {splitPrompt === e.id && (
                                   <div className="mt-1.5 flex items-center justify-between gap-2 border-t border-border/60 pt-1.5">
@@ -3671,25 +3676,15 @@ function Dashboard({ session }) {
 
                           return (
                             <div key={`${item.kind}-${item.data.id ?? idx}-${idx}`} className="flex items-stretch gap-2">
-                              {/* Trilho externo: ícone "nu" em Vintage Blue direto sobre o
-                                  fundo Warm Cream, sem card/borda/fundo próprio, formando
-                                  uma coluna contínua de diário de viagem. */}
-                              <div className="flex w-5 shrink-0 flex-col items-center">
-                                <ItemIcon
-                                  className={`mt-1 shrink-0 text-primary ${isAccommodation ? 'h-3.5 w-3.5' : 'h-4 w-4'}`}
-                                  aria-hidden="true"
-                                />
-                                {idx < realItems.length - 1 && (
-                                  <div className="mt-1 w-px flex-1 bg-border" aria-hidden="true" />
-                                )}
-                              </div>
-
                               {isCompactAccommodation ? (
                                 // A partir da 2ª diária, só um lembrete estreito com o nome
                                 // e "Como chegar" — pra consultar rápido durante a viagem
                                 // sem repetir todos os detalhes da hospedagem todo dia.
                                 <div className="flex flex-1 items-center justify-between gap-2 rounded-lg border border-border/60 bg-card/60 px-2 py-1">
-                                  <p className="font-mono text-xs text-foreground">{item.data.hotel_name}</p>
+                                  <p className="flex items-center gap-1.5 font-mono text-xs text-foreground">
+                                    <ItemIcon className="h-3.5 w-3.5 shrink-0 text-primary" aria-hidden="true" />
+                                    {item.data.hotel_name}
+                                  </p>
                                   {mapsUrl && (
                                     <a
                                       href={mapsUrl}
@@ -3705,11 +3700,15 @@ function Dashboard({ session }) {
                                 </div>
                               ) : (
                               <div
-                                className={`flex flex-1 items-start justify-between gap-2 rounded-xl border border-border bg-card ${
+                                className={`flex flex-1 items-center justify-between gap-2 rounded-xl border border-border bg-card ${
                                   isAccommodation ? 'p-2' : 'p-3'
                                 }`}
                               >
-                                <div className="flex items-start gap-2">
+                                <div className="flex min-w-0 flex-1 items-start gap-2">
+                                  <ItemIcon
+                                    className={`mt-0.5 shrink-0 text-primary ${isAccommodation ? 'h-3.5 w-3.5' : 'h-4 w-4'}`}
+                                    aria-hidden="true"
+                                  />
                                   {!isAccommodation && item.time && (
                                     <span className="shrink-0 pt-0.5 font-mono text-[11px] font-semibold text-foreground">
                                       {item.time.slice(0, 5)}
@@ -3766,7 +3765,38 @@ function Dashboard({ session }) {
                                     </div>
                                   </div>
                                 </div>
-                                <div className="flex shrink-0 flex-col items-center gap-1">
+                                <div className="flex shrink-0 items-center gap-1.5">
+                                  {orderGroup.length > 1 ? (
+                                    <div className="flex flex-col">
+                                      <button
+                                        type="button"
+                                        onClick={() => handleMoveActivity(orderGroup, orderPos, -1)}
+                                        disabled={orderPos <= 0}
+                                        aria-label="Mover para cima"
+                                        className="rounded p-0.5 text-muted-foreground/60 hover:text-foreground disabled:opacity-20"
+                                      >
+                                        <ChevronUp className="h-3 w-3" />
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => handleMoveActivity(orderGroup, orderPos, 1)}
+                                        disabled={orderPos >= orderGroup.length - 1}
+                                        aria-label="Mover para baixo"
+                                        className="rounded p-0.5 text-muted-foreground/60 hover:text-foreground disabled:opacity-20"
+                                      >
+                                        <ChevronDown className="h-3 w-3" />
+                                      </button>
+                                    </div>
+                                  ) : (
+                                    <span className="w-4" aria-hidden="true" />
+                                  )}
+                                  <button
+                                    onClick={() => setEditingItem({ kind: item.kind, data: item.data })}
+                                    aria-label="Editar"
+                                    className="rounded-full p-1 text-muted-foreground hover:bg-muted"
+                                  >
+                                    <Pencil className="h-3.5 w-3.5" />
+                                  </button>
                                   <StatusBadge
                                     compact
                                     pastDate={isPastIso(itemDateIso(item))}
@@ -3784,37 +3814,6 @@ function Dashboard({ session }) {
                                       )
                                     }
                                   />
-                                  <div className="flex items-center gap-0.5">
-                                    {orderGroup.length > 1 && (
-                                      <div className="flex flex-col">
-                                        <button
-                                          type="button"
-                                          onClick={() => handleMoveActivity(orderGroup, orderPos, -1)}
-                                          disabled={orderPos <= 0}
-                                          aria-label="Mover para cima"
-                                          className="rounded p-0.5 text-muted-foreground/60 hover:text-foreground disabled:opacity-20"
-                                        >
-                                          <ChevronUp className="h-3 w-3" />
-                                        </button>
-                                        <button
-                                          type="button"
-                                          onClick={() => handleMoveActivity(orderGroup, orderPos, 1)}
-                                          disabled={orderPos >= orderGroup.length - 1}
-                                          aria-label="Mover para baixo"
-                                          className="rounded p-0.5 text-muted-foreground/60 hover:text-foreground disabled:opacity-20"
-                                        >
-                                          <ChevronDown className="h-3 w-3" />
-                                        </button>
-                                      </div>
-                                    )}
-                                    <button
-                                      onClick={() => setEditingItem({ kind: item.kind, data: item.data })}
-                                      aria-label="Editar"
-                                      className="rounded-full p-1 text-muted-foreground hover:bg-muted"
-                                    >
-                                      <Pencil className="h-3.5 w-3.5" />
-                                    </button>
-                                  </div>
                                 </div>
                               </div>
                               )}
